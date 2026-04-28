@@ -1,0 +1,11 @@
+device: cuda
+limit: null                    # debug: cap N samples per split
+splits: [train, validation, test]
+
+# I/O parallelism
+num_io_workers: 16             # threads per GPU process for torch.save
+                               # 2 GPUs × 16 = 32 cores busy on disk
+prefetch_factor: 4             # batches of forward results queued ahead of writers
+
+# Logging
+log_every: 200                 # progress print interval (per rank)

@@ -1,0 +1,13 @@
+# Dataset + backbone choice. Change these together — feature cache and
+# model.hidden_dim must match the backbone.
+dataset_name: yaful/MAGE
+backbone: gpt2
+backbone_tag: gpt2          # short name used in paths
+hidden_dim: 768             # gpt2:768  gpt2-medium:1024  llama3-1b:2048
+max_len: 512
+min_len: 16
+
+cache_dir: ${paths.cache_root}/${data.backbone_tag}
+train_dir: ${data.cache_dir}/train
+eval_dir:  ${data.cache_dir}/validation
+test_dir:  ${data.cache_dir}/test

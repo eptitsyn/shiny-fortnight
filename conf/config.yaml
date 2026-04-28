@@ -1,0 +1,19 @@
+defaults:
+  - data: mage_gpt2
+  - model: pawn_small
+  - training: default
+  - extract: default
+  - _self_
+
+# Top-level paths every component reads
+paths:
+  cache_root: ${oc.env:PAWN_CACHE,${hydra:runtime.cwd}/cache}
+  run_root:   ${oc.env:PAWN_RUNS,${hydra:runtime.cwd}/runs}
+
+seed: 42
+
+hydra:
+  run:
+    dir: ${paths.run_root}/${now:%Y-%m-%d_%H-%M-%S}_${data.backbone_tag}
+  job:
+    chdir: false

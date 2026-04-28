@@ -1,0 +1,18 @@
+num_metrics: 5
+feature_dim: 5             # ignored when use_metrics_nn=false
+num_gates: 1
+max_len: 512
+
+use_metrics_nn: false
+
+metrics_hidden: 128        # unused, kept for schema parity
+metrics_depth: 2
+
+gate_hidden: 512
+gate_depth: 2
+
+agg_hidden: 256
+agg_depth: 2
+
+dropout: 0.1
+token_dropout: 0.0

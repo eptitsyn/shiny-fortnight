@@ -1,0 +1,29 @@
+# Same MAGE dataset, switched to LLaMA-3.2-1B (downloaded via ModelScope).
+#
+# One-time setup:
+#   pip install modelscope
+#   modelscope download --model LLM-Research/Llama-3.2-1B \
+#       --local_dir /data/new_disk/ptitsyn/hse/models/llama32_1b
+#
+# Use with:
+#   torchrun --standalone --nproc_per_node=2 extract_features.py data=mage_llama
+#   torchrun --standalone --nproc_per_node=2 train.py            data=mage_llama
+#
+# Disk budget: ~900 GB for full MAGE train at max_len=256 in fp16.
+
+dataset_name: yaful/MAGE
+
+# Local path that AutoModel/AutoTokenizer.from_pretrained() reads from.
+# Override on the CLI if your download lives elsewhere:
+#   ... data.backbone=/some/other/path
+backbone: ${oc.env:PAWN_LLAMA_PATH,/data/new_disk/ptitsyn/hse/models/llama32_1b}
+backbone_tag: llama32_1b
+
+hidden_dim: 2048
+max_len: 1024
+min_len: 16
+
+cache_dir: ${paths.cache_root}/${data.backbone_tag}
+train_dir: ${data.cache_dir}/train
+eval_dir:  ${data.cache_dir}/validation
+test_dir:  ${data.cache_dir}/test

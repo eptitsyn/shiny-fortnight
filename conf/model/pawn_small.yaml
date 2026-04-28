@@ -1,0 +1,18 @@
+num_metrics: 5
+feature_dim: 64
+num_gates: 1
+max_len: ${data.max_len}
+
+use_metrics_nn: true       # set false for the simplified ablation
+
+metrics_hidden: 128
+metrics_depth: 2
+
+gate_hidden: 512
+gate_depth: 2
+
+agg_hidden: 256
+agg_depth: 2
+
+dropout: 0.2
+token_dropout: 0.0
