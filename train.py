@@ -13,16 +13,19 @@ Override anything from the CLI:
 
 Switch backbone:
   torchrun --standalone --nproc_per_node=2 train.py \
-      data=mage_llama  # if you create conf/data/mage_llama.yaml
+      data=mage_llama
 """
 from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 
 import hydra
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
+from torch.utils.data import WeightedRandomSampler
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -33,13 +36,11 @@ from transformers import (
 from pawn.data import CachedFeatureDataset, PAWNCollator
 from pawn.metrics import compute_metrics
 from pawn.model import PAWN
-from tqdm import tqdm
 
 log = logging.getLogger(__name__)
 
 
 def is_main_process() -> bool:
-    """True on rank 0 (or in single-process runs)."""
     return int(os.environ.get("RANK", "0")) == 0
 
 
@@ -77,7 +78,6 @@ def build_training_args(cfg: DictConfig) -> TrainingArguments:
         dataloader_num_workers=t.dataloader_num_workers,
         dataloader_pin_memory=t.dataloader_pin_memory,
 
-        # DDP knobs
         ddp_find_unused_parameters=t.ddp_find_unused_parameters,
         ddp_backend=t.ddp_backend,
 
@@ -86,6 +86,58 @@ def build_training_args(cfg: DictConfig) -> TrainingArguments:
         seed=cfg.seed,
         disable_tqdm=False,
     )
+
+
+def make_balanced_sampler(train_ds: CachedFeatureDataset) -> WeightedRandomSampler:
+    ys = train_ds.labels
+    counts = Counter(ys)
+    class_w = {c: 1.0 / n for c, n in counts.items()}
+    weights = torch.tensor([class_w[y] for y in ys], dtype=torch.double)
+    return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+
+
+class PAWNTrainer(Trainer):
+    """Trainer that
+
+    - reproduces the paper's loss: BCE-with-logits with `pos_weight` and the
+      label smoothing scheme `y' = y * (1 - eps) + 0.5 * eps`
+      (ai-gen-detection/train.py:103-105);
+    - optionally swaps the random sampler for a balanced one.
+    """
+
+    def __init__(
+        self,
+        *args,
+        label_smoothing: float = 0.0,
+        pos_weight: float = 1.0,
+        train_sampler=None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.label_smoothing = float(label_smoothing)
+        self._pos_weight = float(pos_weight)
+        self._train_sampler = train_sampler
+
+    def _get_train_sampler(self, train_dataset=None):
+        if self._train_sampler is not None:
+            return self._train_sampler
+        return super()._get_train_sampler(train_dataset)
+
+    def compute_loss(
+        self, model, inputs, return_outputs=False, num_items_in_batch=None
+    ):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        smoothed = labels.float() * (1.0 - self.label_smoothing) + 0.5 * self.label_smoothing
+        pos_weight = torch.tensor(self._pos_weight, device=logits.device, dtype=logits.dtype)
+        loss = F.binary_cross_entropy_with_logits(logits, smoothed, pos_weight=pos_weight)
+
+        # Put labels back so compute_metrics can read them downstream.
+        inputs["labels"] = labels
+        outputs.loss = loss
+        return (loss, outputs) if return_outputs else loss
 
 
 @hydra.main(version_base="1.3", config_path="conf", config_name="config")
@@ -106,18 +158,19 @@ def main(cfg: DictConfig) -> None:
     model = PAWN(
         hidden_dim=cfg.data.hidden_dim,
         num_metrics=cfg.model.num_metrics,
-        feature_dim=cfg.model.feature_dim,
+        num_hidden_features=cfg.model.num_hidden_features,
+        num_hidden_layers=cfg.model.num_hidden_layers,
+        gate_nn_num_layers=cfg.model.gate_nn_num_layers,
         num_gates=cfg.model.num_gates,
+        activation=cfg.model.activation,
+        norm_type=cfg.model.norm_type,
+        residual=cfg.model.residual,
+        concat_consecutive_hidden_states=cfg.model.concat_consecutive_hidden_states,
+        pos_embed_dim=cfg.model.pos_embed_dim,
         max_len=cfg.model.max_len,
-        metrics_hidden=cfg.model.metrics_hidden,
-        metrics_depth=cfg.model.metrics_depth,
-        gate_hidden=cfg.model.gate_hidden,
-        gate_depth=cfg.model.gate_depth,
-        agg_hidden=cfg.model.agg_hidden,
-        agg_depth=cfg.model.agg_depth,
+        aggregation_method=cfg.model.aggregation_method,
         dropout=cfg.model.dropout,
-        token_dropout=cfg.model.token_dropout,
-        use_metrics_nn=cfg.model.use_metrics_nn,
+        dropout_tokens=cfg.model.dropout_tokens,
     )
     if is_main_process():
         n = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -125,35 +178,11 @@ def main(cfg: DictConfig) -> None:
 
     training_args = build_training_args(cfg)
 
-    from collections import Counter
-    from torch.utils.data import WeightedRandomSampler
-
-
-    def make_balanced_sampler(train_ds: CachedFeatureDataset) -> WeightedRandomSampler:
-        ys = train_ds.labels  # O(N) attribute access, no torch.load
-        counts = Counter(ys)
-        class_w = {c: 1.0 / n for c, n in counts.items()}
-        weights = torch.tensor([class_w[y] for y in ys], dtype=torch.double)
-        return WeightedRandomSampler(
-            weights, num_samples=len(weights), replacement=True
-        )
-
-
-    class BalancedTrainer(Trainer):
-        def __init__(self, *args, train_sampler=None, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._train_sampler = train_sampler
-
-        def _get_train_sampler(self, train_dataset=None):
-            return self._train_sampler
-
-
-    # in main():
     sampler = make_balanced_sampler(train_ds) if cfg.training.balanced_sampler else None
     if is_main_process() and sampler is not None:
         log.info(f"label distribution: {Counter(train_ds.labels)}")
 
-    trainer = BalancedTrainer(
+    trainer = PAWNTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
@@ -163,6 +192,8 @@ def main(cfg: DictConfig) -> None:
         callbacks=[EarlyStoppingCallback(
             early_stopping_patience=cfg.training.early_stopping_patience,
         )],
+        label_smoothing=cfg.training.label_smoothing,
+        pos_weight=cfg.training.pos_weight,
         train_sampler=sampler,
     )
 

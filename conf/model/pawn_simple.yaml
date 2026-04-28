@@ -1,18 +1,27 @@
-num_metrics: 5
-feature_dim: 5             # ignored when use_metrics_nn=false
-num_gates: 1
-max_len: 512
+# Smaller variant matching configs/model/llm_metrics_mlp.yaml in the original
+# ai-gen-detection repo (the base, non-MAGE-tuned defaults: 128 features,
+# 1 hidden layer, learned positional embeddings of dim 16, dropout 0.1,
+# 3 metrics instead of 5).
 
-use_metrics_nn: false
+num_metrics: 3
 
-metrics_hidden: 128        # unused, kept for schema parity
-metrics_depth: 2
+# MLP shape
+num_hidden_features: 128
+num_hidden_layers: 1
+gate_nn_num_layers: null     # null -> follow num_hidden_layers
+num_gates: null              # null -> follow num_hidden_features
+activation: gelu
+norm_type: layer
+residual: true
 
-gate_hidden: 512
-gate_depth: 2
+# Gate input composition
+concat_consecutive_hidden_states: false
+pos_embed_dim: 16            # 0 -> normalized scalar position; >0 -> learned embedding
+max_len: ${data.max_len}
 
-agg_hidden: 256
-agg_depth: 2
+# Aggregation
+aggregation_method: attention   # attention | sigmoid | mean
 
+# Regularization
 dropout: 0.1
-token_dropout: 0.0
+dropout_tokens: 0.0

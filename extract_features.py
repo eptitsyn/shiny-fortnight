@@ -53,19 +53,31 @@ def shard_indices(n: int, rank: int, world: int) -> list[int]:
 def compute_metrics_per_token(
     logits: torch.Tensor, target_ids: torch.Tensor
 ) -> torch.Tensor:
+    """Returns the 5 paper metrics in alphabetical order, matching
+    src/models/utils/frozen_pretrained_model.py:__get_metrics in the original
+    repo (which sorts metric names before stacking):
+        [entropy, max_log_probs, next_token_log_probs, quantile, top_p]
+
+    `quantile` and `top_p` use `>=` (so the target token is included in its
+    own quantile / cumulative-probability mass), again matching the original.
+    """
     log_probs = F.log_softmax(logits.float(), dim=-1)
     probs = log_probs.exp()
-    V = logits.size(-1)
 
     target = target_ids.unsqueeze(-1)
-    lp_true = log_probs.gather(-1, target).squeeze(-1)
+    next_token_log_probs = log_probs.gather(-1, target).squeeze(-1)
     entropy = -(probs * log_probs).sum(-1)
-    max_lp = log_probs.max(dim=-1).values
-    rank = (log_probs > lp_true.unsqueeze(-1)).sum(-1).float() / V
-    target_p = probs.gather(-1, target)
-    top_p_mass = (probs * (probs >= target_p)).sum(-1)
+    max_log_probs = log_probs.max(dim=-1).values
 
-    return torch.stack([lp_true, entropy, max_lp, rank, top_p_mass], dim=-1)
+    # Tokens with log-prob >= the target token's log-prob (target itself
+    # always satisfies this, so quantile is in (0, 1]).
+    greater_mask = (log_probs >= next_token_log_probs.unsqueeze(-1)).to(probs.dtype)
+    quantile = greater_mask.mean(dim=-1)
+    top_p = (probs * greater_mask).sum(-1)
+
+    return torch.stack(
+        [entropy, max_log_probs, next_token_log_probs, quantile, top_p], dim=-1
+    )
 
 
 def label_to_y(label: int) -> int:

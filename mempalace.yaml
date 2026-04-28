@@ -1,0 +1,30 @@
+wing: shiny_fortnight
+rooms:
+- name: pawn
+  description: Files from pawn/
+  keywords:
+  - pawn
+  - pawn
+- name: ai_gen_detection
+  description: Files from ai-gen-detection/
+  keywords:
+  - ai_gen_detection
+  - ai-gen-detection
+- name: scripts
+  description: Files from scripts/
+  keywords:
+  - scripts
+  - scripts
+- name: conf
+  description: Files from conf/
+  keywords:
+  - conf
+  - conf
+- name: configuration
+  description: Files from configs/
+  keywords:
+  - configuration
+  - configs
+- name: general
+  description: Files that don't fit other rooms
+  keywords: []

@@ -1,18 +1,25 @@
+# Defaults from configs/experiment/mage/llm_metrics_mlp_gpt2.yaml in the
+# original ai-gen-detection repo (paper config for MAGE / GPT-2).
+
 num_metrics: 5
-feature_dim: 64
-num_gates: 1
+
+# MLP shape
+num_hidden_features: 256
+num_hidden_layers: 3
+gate_nn_num_layers: null     # null -> follow num_hidden_layers
+num_gates: null              # null -> follow num_hidden_features (one gate per feature)
+activation: gelu
+norm_type: layer
+residual: true
+
+# Gate input composition
+concat_consecutive_hidden_states: true
+pos_embed_dim: 0             # 0 -> normalized scalar position; >0 -> learned embedding
 max_len: ${data.max_len}
 
-use_metrics_nn: true       # set false for the simplified ablation
+# Aggregation
+aggregation_method: attention   # attention | sigmoid | mean
 
-metrics_hidden: 128
-metrics_depth: 2
-
-gate_hidden: 512
-gate_depth: 2
-
-agg_hidden: 256
-agg_depth: 2
-
-dropout: 0.2
-token_dropout: 0.0
+# Regularization
+dropout: 0.0
+dropout_tokens: 0.15
