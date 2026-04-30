@@ -1,29 +1,84 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
+from pawn.index import ShardMeta, build_index
 from torch.utils.data import Dataset
 
-from pawn.index import ShardMeta, build_index
+
+# Filter spec: either a callable taking a ShardMeta -> bool, or a dict
+# mapping a field name (top-level ShardMeta or `meta` key) to either an
+# explicit list of allowed values or a regex pattern (string starting with
+# 'regex:' or compiled re.Pattern). Multiple keys AND together.
+FilterSpec = Callable[[ShardMeta], bool] | dict[str, Any] | None
+
+
+def _shard_field(m: ShardMeta, key: str) -> Any:
+    """Look up `key` on the ShardMeta, falling back to its `meta` dict."""
+    if hasattr(m, key) and key != "meta":
+        return getattr(m, key)
+    return m.meta.get(key)
+
+
+def _matcher(allowed: Any) -> Callable[[Any], bool]:
+    if callable(allowed):
+        return allowed
+    if isinstance(allowed, re.Pattern):
+        return lambda v: v is not None and bool(allowed.search(str(v)))
+    if isinstance(allowed, str) and allowed.startswith("regex:"):
+        pat = re.compile(allowed[len("regex:"):])
+        return lambda v: v is not None and bool(pat.search(str(v)))
+    if isinstance(allowed, (list, tuple, set)):
+        s = set(allowed)
+        return lambda v: v in s
+    # Scalar -> equality
+    return lambda v: v == allowed
+
+
+def apply_filter(metas: list[ShardMeta], spec: FilterSpec) -> list[ShardMeta]:
+    if spec is None:
+        return metas
+    if callable(spec):
+        return [m for m in metas if spec(m)]
+
+    matchers = {k: _matcher(v) for k, v in spec.items()}
+
+    def keep(m: ShardMeta) -> bool:
+        for k, match in matchers.items():
+            if not match(_shard_field(m, k)):
+                return False
+        return True
+
+    return [m for m in metas if keep(m)]
 
 
 class CachedFeatureDataset(Dataset):
-    """Loads .pt feature shards. Uses a pre-built index for fast startup."""
+    """Loads .pt feature shards. Uses a pre-built index for fast startup.
+
+    `filter` (optional) selects a subset of shards by metadata. Pass either
+    a callable, or a dict like `{"src": ["cmv_human", "cmv_chatglm"]}`. See
+    `apply_filter` for the supported value forms (list/regex/scalar).
+    """
 
     def __init__(
         self,
         root: str | Path,
         max_len: int = 512,
         index_workers: int = 16,
+        filter: FilterSpec = None,
     ):
-        self.metas: list[ShardMeta] = build_index(
-            Path(root), num_workers=index_workers
-        )
-        if not self.metas:
+        all_metas = build_index(Path(root), num_workers=index_workers)
+        if not all_metas:
             raise FileNotFoundError(f"no .pt shards under {root}")
+        self.metas: list[ShardMeta] = apply_filter(all_metas, filter)
+        if not self.metas:
+            raise FileNotFoundError(
+                f"filter {filter!r} matched 0/{len(all_metas)} shards under {root}"
+            )
         self.max_len = max_len
 
     def __len__(self) -> int:

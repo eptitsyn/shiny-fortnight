@@ -11,7 +11,6 @@ from transformers.utils import ModelOutput
 
 @dataclass
 class PAWNOutput(ModelOutput):
-    loss: Optional[torch.Tensor] = None
     logits: Optional[torch.Tensor] = None  # [B] raw logit
 
 
@@ -128,7 +127,6 @@ class PAWN(nn.Module):
       hs_next:        [B, T, H]  hidden state at position t+1
       metrics:        [B, T, M]  M raw next-token-distribution metrics
       attention_mask: [B, T]     1 = valid token, 0 = padding
-      labels:         [B]        in {0, 1}, 1 = machine-generated  (optional)
 
     Pipeline (matches the original LLMMetricsMLP):
       1. metrics_nn(metrics) -> [B, T, F]
@@ -258,7 +256,6 @@ class PAWN(nn.Module):
         hs_next: torch.Tensor,           # [B, T, H]
         metrics: torch.Tensor,           # [B, T, M]
         attention_mask: torch.Tensor,    # [B, T]
-        labels: Optional[torch.Tensor] = None,  # [B]
     ) -> PAWNOutput:
         B, T, _ = hs_curr.shape
         device = hs_curr.device
@@ -270,7 +267,7 @@ class PAWN(nn.Module):
             coeffs = am / am.sum(dim=-1, keepdim=True).clamp_min(1.0)
             pooled = torch.einsum("blf,bl->bf", processed_metrics, coeffs)
             logits = self.aggregate_nn(pooled).squeeze(-1)
-            return self._make_output(logits, labels)
+            return PAWNOutput(logits=logits)
 
         # ---- gate input ----
         gate_x_list = [hs_curr]
@@ -305,15 +302,4 @@ class PAWN(nn.Module):
             raise ValueError(f"Unknown aggregation_method: {self.aggregation_method!r}")
 
         logits = self.aggregate_nn(pooled).squeeze(-1)
-        return self._make_output(logits, labels)
-
-    def _make_output(
-        self, logits: torch.Tensor, labels: Optional[torch.Tensor]
-    ) -> PAWNOutput:
-        # Default plain-BCE loss so HF Trainer works out of the box. Override
-        # this in a Trainer subclass (compute_loss) when you need
-        # label_smoothing / pos_weight as in the paper.
-        loss = None
-        if labels is not None:
-            loss = F.binary_cross_entropy_with_logits(logits, labels.float())
-        return PAWNOutput(loss=loss, logits=logits)
+        return PAWNOutput(logits=logits)

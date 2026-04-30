@@ -11,6 +11,7 @@ CLI overrides:
   torchrun --standalone --nproc_per_node=2 extract_features.py \
       extract.splits='[validation,test]' extract.num_io_workers=8
 """
+
 from __future__ import annotations
 
 import logging
@@ -18,7 +19,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
-from threading import Thread
 from typing import Any
 
 import hydra
@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 # ---------- DDP helpers ----------
 
+
 def ddp_info() -> tuple[int, int, int]:
     """Returns (rank, world_size, local_rank). Works under torchrun or solo."""
     rank = int(os.environ.get("RANK", "0"))
@@ -48,6 +49,7 @@ def shard_indices(n: int, rank: int, world: int) -> list[int]:
 
 
 # ---------- Metric computation (unchanged) ----------
+
 
 @torch.no_grad()
 def compute_metrics_per_token(
@@ -84,7 +86,18 @@ def label_to_y(label: int) -> int:
     return 1 - int(label)
 
 
+# Columns we keep from a HF dataset row, sans the heavy `text` payload.
+# Anything scalar-ish lands in the shard's `meta` dict so the downstream
+# dataset can filter testbeds (by `src`, `model`, ...) at load time.
+_META_OK = (str, int, float, bool, type(None))
+
+
+def row_meta(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in row.items() if k != "text" and isinstance(v, _META_OK)}
+
+
 # ---------- Async writer ----------
+
 
 def save_payload(path: Path, payload: dict[str, Any]) -> None:
     """Runs in worker thread. torch.save releases the GIL for the heavy bytes."""
@@ -95,9 +108,10 @@ def save_payload(path: Path, payload: dict[str, Any]) -> None:
 
 # ---------- Per-rank extraction ----------
 
+
 def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
     rank, world, local_rank = ddp_info()
-    device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
     out_dir = Path(cfg.data.cache_dir) / split
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -106,11 +120,15 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.data.backbone,
-        torch_dtype=torch.bfloat16,
-        output_hidden_states=True,
-    ).to(device).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            cfg.data.backbone,
+            torch_dtype=torch.bfloat16,
+            output_hidden_states=True,
+        )
+        .to(device)
+        .eval()
+    )
 
     ds = load_dataset(cfg.data.dataset_name, split=split)
     if cfg.extract.limit:
@@ -122,8 +140,6 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
         f"shard={len(my_indices)}/{len(ds)} device={device}"
     )
 
-    # Thread pool for disk writes. Bounded queue keeps RAM in check when
-    # the GPU runs ahead of disk.
     max_pending = cfg.extract.num_io_workers * cfg.extract.prefetch_factor
     pending: Queue = Queue(maxsize=max_pending)
     pool = ThreadPoolExecutor(max_workers=cfg.extract.num_io_workers)
@@ -180,6 +196,8 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
             "length": int(hs_curr.size(0)),
             "y": label_to_y(row["label"]),
             "src": row.get("src", ""),
+            "split": split,
+            "meta": row_meta(row),
         }
         submit(out_path, payload)
         kept += 1
@@ -189,13 +207,9 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
         pending.get().result()
     pool.shutdown(wait=True)
 
-    log.info(
-        f"[rank {rank}] split={split} kept={kept} skipped={skipped} "
-        f"out={out_dir}"
-    )
+    log.info(f"[rank {rank}] split={split} kept={kept} skipped={skipped} out={out_dir}")
 
 
-# ---------- Entrypoint ----------
 
 @hydra.main(version_base="1.3", config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
@@ -203,8 +217,6 @@ def main(cfg: DictConfig) -> None:
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
 
-    # Cap PyTorch CPU thread pool so 2 ranks × N IO workers don't oversubscribe.
-    # We split CPU budget evenly: 32 cores / 2 ranks = 16 each, minus IO threads.
     cpu_per_rank = max(1, (os.cpu_count() or 32) // max(world, 1))
     torch_threads = max(1, cpu_per_rank - cfg.extract.num_io_workers)
     torch.set_num_threads(torch_threads)

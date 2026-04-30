@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.special import expit
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -8,11 +9,6 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
-
-
-def sigmoid(x: np.ndarray) -> np.ndarray:
-    # numerically stable sigmoid
-    return np.where(x >= 0, 1.0 / (1.0 + np.exp(-x)), np.exp(x) / (1.0 + np.exp(x)))
 
 
 def _recalls_at(
@@ -94,7 +90,7 @@ def compute_metrics(eval_pred) -> dict[str, float]:
     """
     logits = np.asarray(eval_pred.predictions).reshape(-1)
     labels = np.asarray(eval_pred.label_ids).reshape(-1)
-    probs = sigmoid(logits)
+    probs = expit(logits)
 
     out: dict[str, float] = {}
     out.update(_metrics_at(probs, labels, threshold=0.5, suffix=""))

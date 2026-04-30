@@ -17,6 +17,7 @@ Switch backbone:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections import Counter
@@ -42,6 +43,48 @@ log = logging.getLogger(__name__)
 
 def is_main_process() -> bool:
     return int(os.environ.get("RANK", "0")) == 0
+
+
+def _to_plain(node):
+    """OmegaConf-or-plain -> plain Python (so apply_filter sees lists/dicts)."""
+    if node is None:
+        return None
+    if OmegaConf.is_config(node):
+        return OmegaConf.to_container(node, resolve=True)
+    return node
+
+
+def _build_eval_datasets(cfg: DictConfig):
+    """Return either a single CachedFeatureDataset (legacy) or a
+    {name: CachedFeatureDataset} dict when `data.testbeds` is set.
+
+    Each testbed entry is one of:
+      - "<sub-path>"                            # cache_dir / <sub-path>
+      - {dir: <path>, filter: {<key>: [...]}}   # explicit dir, optional filter
+      - {filter: {<key>: [...]}}                # default eval_dir, filter only
+    HF Trainer prefixes per-testbed metrics with `eval_<name>_*`.
+    """
+    testbeds = _to_plain(cfg.data.get("testbeds"))
+    if not testbeds:
+        eval_filter = _to_plain(cfg.data.get("eval_filter"))
+        return CachedFeatureDataset(
+            cfg.data.eval_dir, max_len=cfg.data.max_len, filter=eval_filter,
+        )
+
+    out: dict[str, CachedFeatureDataset] = {}
+    for name, spec in testbeds.items():
+        if isinstance(spec, str):
+            spec = {"dir": spec}
+        d = spec.get("dir", cfg.data.eval_dir)
+        # Resolve relative paths against cache_dir for ergonomics
+        if not os.path.isabs(d) and not os.path.exists(d):
+            cand = os.path.join(cfg.data.cache_dir, d)
+            if os.path.exists(cand):
+                d = cand
+        out[name] = CachedFeatureDataset(
+            d, max_len=cfg.data.max_len, filter=spec.get("filter"),
+        )
+    return out
 
 
 def build_training_args(cfg: DictConfig) -> TrainingArguments:
@@ -150,10 +193,18 @@ def main(cfg: DictConfig) -> None:
         with open(os.path.join(cfg.training.output_dir, "config.yaml"), "w") as f:
             OmegaConf.save(cfg, f)
 
-    train_ds = CachedFeatureDataset(cfg.data.train_dir, max_len=cfg.data.max_len)
-    eval_ds = CachedFeatureDataset(cfg.data.eval_dir, max_len=cfg.data.max_len)
+    train_ds = CachedFeatureDataset(
+        cfg.data.train_dir,
+        max_len=cfg.data.max_len,
+        filter=_to_plain(cfg.data.get("train_filter")),
+    )
+    eval_ds = _build_eval_datasets(cfg)
     if is_main_process():
-        log.info(f"train={len(train_ds)}  eval={len(eval_ds)}")
+        if isinstance(eval_ds, dict):
+            sizes = {k: len(v) for k, v in eval_ds.items()}
+            log.info(f"train={len(train_ds)}  eval={sizes}")
+        else:
+            log.info(f"train={len(train_ds)}  eval={len(eval_ds)}")
 
     model = PAWN(
         hidden_dim=cfg.data.hidden_dim,
@@ -206,6 +257,11 @@ def main(cfg: DictConfig) -> None:
     if is_main_process():
         log.info({k: round(v, 4) for k, v in eval_metrics.items()
                   if isinstance(v, (int, float))})
+        with open(os.path.join(cfg.training.output_dir, "eval_metrics.json"), "w") as f:
+            json.dump(
+                {k: v for k, v in eval_metrics.items() if isinstance(v, (int, float, str))},
+                f, indent=2,
+            )
 
 
 if __name__ == "__main__":
