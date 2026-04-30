@@ -9,7 +9,6 @@ import torch
 from pawn.index import ShardMeta, build_index
 from torch.utils.data import Dataset
 
-
 # Filter spec: either a callable taking a ShardMeta -> bool, or a dict
 # mapping a field name (top-level ShardMeta or `meta` key) to either an
 # explicit list of allowed values or a regex pattern (string starting with
@@ -30,7 +29,7 @@ def _matcher(allowed: Any) -> Callable[[Any], bool]:
     if isinstance(allowed, re.Pattern):
         return lambda v: v is not None and bool(allowed.search(str(v)))
     if isinstance(allowed, str) and allowed.startswith("regex:"):
-        pat = re.compile(allowed[len("regex:"):])
+        pat = re.compile(allowed[len("regex:") :])
         return lambda v: v is not None and bool(pat.search(str(v)))
     if isinstance(allowed, (list, tuple, set)):
         s = set(allowed)

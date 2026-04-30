@@ -210,7 +210,6 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
     log.info(f"[rank {rank}] split={split} kept={kept} skipped={skipped} out={out_dir}")
 
 
-
 @hydra.main(version_base="1.3", config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     rank, world, local_rank = ddp_info()
