@@ -9,10 +9,6 @@ import torch
 from pawn.index import ShardMeta, build_index
 from torch.utils.data import Dataset
 
-# Filter spec: either a callable taking a ShardMeta -> bool, or a dict
-# mapping a field name (top-level ShardMeta or `meta` key) to either an
-# explicit list of allowed values or a regex pattern (string starting with
-# 'regex:' or compiled re.Pattern). Multiple keys AND together.
 FilterSpec = Callable[[ShardMeta], bool] | dict[str, Any] | None
 
 
@@ -56,12 +52,6 @@ def apply_filter(metas: list[ShardMeta], spec: FilterSpec) -> list[ShardMeta]:
 
 
 class CachedFeatureDataset(Dataset):
-    """Loads .pt feature shards. Uses a pre-built index for fast startup.
-
-    `filter` (optional) selects a subset of shards by metadata. Pass either
-    a callable, or a dict like `{"src": ["cmv_human", "cmv_chatglm"]}`. See
-    `apply_filter` for the supported value forms (list/regex/scalar).
-    """
 
     def __init__(
         self,

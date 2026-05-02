@@ -16,7 +16,7 @@ residual: true
 
 # Gate input composition
 concat_consecutive_hidden_states: false
-pos_embed_dim: 16            # 0 -> normalized scalar position; >0 -> learned embedding
+pos_embed_dim: 16            # 0 -> fwd+rev normalized position only; >0 (even) -> add that many sinusoidal Fourier channels
 max_len: ${data.max_len}
 
 # Aggregation

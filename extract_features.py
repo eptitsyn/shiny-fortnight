@@ -1,11 +1,8 @@
 """
-Multi-GPU + multi-threaded feature extraction.
+Feature extraction.
 
-Launch on 2 GPUs:
-  torchrun --standalone --nproc_per_node=2 extract_features.py
-
-Single GPU fallback (also works):
-  python extract_features.py
+torchrun --standalone --nproc_per_node=2 extract_features.py
+python extract_features.py
 
 CLI overrides:
   torchrun --standalone --nproc_per_node=2 extract_features.py \
@@ -16,7 +13,9 @@ from __future__ import annotations
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue
 from typing import Any
@@ -27,16 +26,25 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from omegaconf import DictConfig
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
 log = logging.getLogger(__name__)
+
+_META_OK = (str, int, float, bool, type(None))
+
+SubmitFn = Callable[[Path, dict[str, Any]], None]
 
 
 # ---------- DDP helpers ----------
 
 
 def ddp_info() -> tuple[int, int, int]:
-    """Returns (rank, world_size, local_rank). Works under torchrun or solo."""
+    """(rank, world_size, local_rank). Works under torchrun or solo."""
     rank = int(os.environ.get("RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -48,21 +56,13 @@ def shard_indices(n: int, rank: int, world: int) -> list[int]:
     return list(range(rank, n, world))
 
 
-# ---------- Metric computation (unchanged) ----------
+# ---------- Per-token metrics ----------
 
 
 @torch.no_grad()
 def compute_metrics_per_token(
     logits: torch.Tensor, target_ids: torch.Tensor
 ) -> torch.Tensor:
-    """Returns the 5 paper metrics in alphabetical order, matching
-    src/models/utils/frozen_pretrained_model.py:__get_metrics in the original
-    repo (which sorts metric names before stacking):
-        [entropy, max_log_probs, next_token_log_probs, quantile, top_p]
-
-    `quantile` and `top_p` use `>=` (so the target token is included in its
-    own quantile / cumulative-probability mass), again matching the original.
-    """
     log_probs = F.log_softmax(logits.float(), dim=-1)
     probs = log_probs.exp()
 
@@ -86,27 +86,88 @@ def label_to_y(label: int) -> int:
     return 1 - int(label)
 
 
-# Columns we keep from a HF dataset row, sans the heavy `text` payload.
-# Anything scalar-ish lands in the shard's `meta` dict so the downstream
-# dataset can filter testbeds (by `src`, `model`, ...) at load time.
-_META_OK = (str, int, float, bool, type(None))
-
-
 def row_meta(row: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in row.items() if k != "text" and isinstance(v, _META_OK)}
 
 
-# ---------- Async writer ----------
+def load_backbone(
+    backbone: str, device: torch.device
+) -> tuple[PreTrainedTokenizerBase, PreTrainedModel]:
+    tok = AutoTokenizer.from_pretrained(backbone)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            backbone,
+            torch_dtype=torch.bfloat16,
+            output_hidden_states=True,
+        )
+        .to(device)
+        .eval()
+    )
+    return tok, model
 
 
-def save_payload(path: Path, payload: dict[str, Any]) -> None:
-    """Runs in worker thread. torch.save releases the GIL for the heavy bytes."""
+def _save_payload(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_suffix(".pt.tmp")
     torch.save(payload, tmp)
-    os.replace(tmp, path)  # atomic — partial files won't pollute the cache
+    os.replace(tmp, path)
 
 
-# ---------- Per-rank extraction ----------
+@contextmanager
+def async_saver(num_workers: int, max_pending: int) -> Iterator[SubmitFn]:
+    pool = ThreadPoolExecutor(max_workers=num_workers)
+    pending: Queue[Future] = Queue(maxsize=max_pending)
+
+    def submit(path: Path, payload: dict[str, Any]) -> None:
+        pending.put(pool.submit(_save_payload, path, payload))
+        while not pending.empty() and pending.queue[0].done():
+            pending.get().result()
+
+    try:
+        yield submit
+    finally:
+        while not pending.empty():
+            pending.get().result()
+        pool.shutdown(wait=True)
+
+
+@torch.no_grad()
+def extract_one(
+    model: PreTrainedModel,
+    tok: PreTrainedTokenizerBase,
+    row: dict[str, Any],
+    cfg: DictConfig,
+    split: str,
+    device: torch.device,
+) -> dict[str, Any] | None:
+    enc = tok(
+        row["text"],
+        return_tensors="pt",
+        truncation=True,
+        max_length=cfg.data.max_len,
+        padding=False,
+    ).to(device)
+    ids = enc["input_ids"]
+    if ids.size(1) < cfg.data.min_len:
+        return None
+
+    out = model(**enc)
+    hs = out.hidden_states[-1][0]
+    metrics = compute_metrics_per_token(out.logits[0, :-1], ids[0, 1:])
+    hs_curr = hs[:-1]
+    hs_next = hs[1:]
+
+    return {
+        "hs_curr": hs_curr.to(torch.float16).cpu().contiguous(),
+        "hs_next": hs_next.to(torch.float16).cpu().contiguous(),
+        "metrics": metrics.to(torch.float16).cpu().contiguous(),
+        "length": int(hs_curr.size(0)),
+        "y": label_to_y(row["label"]),
+        "src": row.get("src", ""),
+        "split": split,
+        "meta": row_meta(row),
+    }
 
 
 def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
@@ -116,19 +177,7 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
     out_dir = Path(cfg.data.cache_dir) / split
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tok = AutoTokenizer.from_pretrained(cfg.data.backbone)
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
-
-    model = (
-        AutoModelForCausalLM.from_pretrained(
-            cfg.data.backbone,
-            torch_dtype=torch.bfloat16,
-            output_hidden_states=True,
-        )
-        .to(device)
-        .eval()
-    )
+    tok, model = load_backbone(cfg.data.backbone, device)
 
     ds = load_dataset(cfg.data.dataset_name, split=split)
     if cfg.extract.limit:
@@ -141,71 +190,23 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
     )
 
     max_pending = cfg.extract.num_io_workers * cfg.extract.prefetch_factor
-    pending: Queue = Queue(maxsize=max_pending)
-    pool = ThreadPoolExecutor(max_workers=cfg.extract.num_io_workers)
-
-    def submit(path: Path, payload: dict[str, Any]) -> None:
-        future = pool.submit(save_payload, path, payload)
-        pending.put(future)
-        # Drain completed futures so exceptions surface promptly.
-        while not pending.empty() and pending.queue[0].done():
-            pending.get().result()
-
     kept = skipped = 0
     progress = tqdm(
         my_indices, desc=f"r{rank}[{split}]", disable=(rank != 0), mininterval=1.0
     )
 
-    for idx in progress:
-        row = ds[idx]
-        out_path = out_dir / f"{idx:08d}.pt"
-        if out_path.exists():
-            # Resume support — skip already-cached samples.
-            skipped += 1
-            continue
+    with async_saver(cfg.extract.num_io_workers, max_pending) as submit:
+        for idx in progress:
+            out_path = out_dir / f"{idx:08d}.pt"
+            if out_path.exists():
+                skipped += 1
+                continue
 
-        enc = tok(
-            row["text"],
-            return_tensors="pt",
-            truncation=True,
-            max_length=cfg.data.max_len,
-            padding=False,
-        ).to(device)
-        ids = enc["input_ids"]
-        if ids.size(1) < cfg.data.min_len:
-            continue
-
-        with torch.no_grad():
-            out = model(**enc)
-        hs = out.hidden_states[-1][0]
-        logits = out.logits[0]
-
-        target = ids[0, 1:]
-        logits = logits[:-1]
-        hs_curr = hs[:-1]
-        hs_next = hs[1:]
-
-        metrics = compute_metrics_per_token(logits, target)
-
-        # Move to CPU + fp16 on the GPU thread (fast). The slow part is
-        # serialization + fsync, which the writer thread handles.
-        payload = {
-            "hs_curr": hs_curr.to(torch.float16).cpu().contiguous(),
-            "hs_next": hs_next.to(torch.float16).cpu().contiguous(),
-            "metrics": metrics.to(torch.float16).cpu().contiguous(),
-            "length": int(hs_curr.size(0)),
-            "y": label_to_y(row["label"]),
-            "src": row.get("src", ""),
-            "split": split,
-            "meta": row_meta(row),
-        }
-        submit(out_path, payload)
-        kept += 1
-
-    # Drain remaining writes
-    while not pending.empty():
-        pending.get().result()
-    pool.shutdown(wait=True)
+            payload = extract_one(model, tok, ds[idx], cfg, split, device)
+            if payload is None:
+                continue
+            submit(out_path, payload)
+            kept += 1
 
     log.info(f"[rank {rank}] split={split} kept={kept} skipped={skipped} out={out_dir}")
 

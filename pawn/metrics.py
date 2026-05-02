@@ -43,28 +43,17 @@ def _metrics_at(
 def find_best_threshold(
     probs: np.ndarray, labels: np.ndarray, criterion: str = "youden"
 ) -> float:
-    """Pick a threshold from the ROC curve.
-
-    criterion:
-      - 'youden': maximizes TPR - FPR (= max balanced accuracy on ROC).
-                  Optimal under equal class costs and the standard MAGE setup.
-      - 'avg_rec': sweeps thresholds and maximizes 0.5 * (machine_rec + human_rec).
-                   Equivalent to 'youden' for binary classification but computed
-                   directly from recalls — useful as a sanity check.
-    """
     if len(np.unique(labels)) < 2:
-        return 0.5  # degenerate eval batch — fall back to default
+        return 0.5
 
     if criterion == "youden":
         fpr, tpr, thresholds = roc_curve(labels, probs)
-        # roc_curve prepends a +inf threshold; mask it so we don't pick it.
+
         valid = np.isfinite(thresholds)
         j = (tpr - fpr)[valid]
         return float(thresholds[valid][j.argmax()])
 
     if criterion == "avg_rec":
-        # Sweep candidate thresholds; ROC's thresholds are exactly the points
-        # where the predicted class changes for at least one sample.
         _, _, thresholds = roc_curve(labels, probs)
         thresholds = thresholds[np.isfinite(thresholds)]
         scores = np.array([
@@ -76,18 +65,6 @@ def find_best_threshold(
 
 
 def compute_metrics(eval_pred) -> dict[str, float]:
-    """Trainer entrypoint.
-
-    eval_pred.predictions: [B] raw logits (model returns logits as the only tensor)
-    eval_pred.label_ids:   [B] in {0, 1}, 1 = machine-generated
-
-    Reports two views:
-      - <metric>: at the default 0.5 threshold (comparable to most baselines)
-      - <metric>_at_best: at the threshold that maximizes Youden's J on this eval set
-
-    The best threshold is itself logged as 'best_threshold' so you can reuse it
-    when running .predict() on the test split or OOD testbeds.
-    """
     logits = np.asarray(eval_pred.predictions).reshape(-1)
     labels = np.asarray(eval_pred.label_ids).reshape(-1)
     probs = expit(logits)
@@ -102,7 +79,6 @@ def compute_metrics(eval_pred) -> dict[str, float]:
         out["best_threshold"] = best_t
         out.update(_metrics_at(probs, labels, threshold=best_t, suffix="_at_best"))
 
-    # Also log the prediction prior — useful for spotting class collapse.
     out["pred_machine_frac"] = float((probs >= 0.5).mean())
     out["label_machine_frac"] = float(labels.mean())
 

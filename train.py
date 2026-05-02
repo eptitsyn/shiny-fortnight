@@ -46,7 +46,6 @@ def is_main_process() -> bool:
 
 
 def _to_plain(node):
-    """OmegaConf-or-plain -> plain Python (so apply_filter sees lists/dicts)."""
     if node is None:
         return None
     if OmegaConf.is_config(node):
@@ -55,15 +54,6 @@ def _to_plain(node):
 
 
 def _build_eval_datasets(cfg: DictConfig):
-    """Return either a single CachedFeatureDataset (legacy) or a
-    {name: CachedFeatureDataset} dict when `data.testbeds` is set.
-
-    Each testbed entry is one of:
-      - "<sub-path>"                            # cache_dir / <sub-path>
-      - {dir: <path>, filter: {<key>: [...]}}   # explicit dir, optional filter
-      - {filter: {<key>: [...]}}                # default eval_dir, filter only
-    HF Trainer prefixes per-testbed metrics with `eval_<name>_*`.
-    """
     testbeds = _to_plain(cfg.data.get("testbeds"))
     if not testbeds:
         eval_filter = _to_plain(cfg.data.get("eval_filter"))
@@ -140,13 +130,6 @@ def make_balanced_sampler(train_ds: CachedFeatureDataset) -> WeightedRandomSampl
 
 
 class PAWNTrainer(Trainer):
-    """Trainer that
-
-    - reproduces the paper's loss: BCE-with-logits with `pos_weight` and the
-      label smoothing scheme `y' = y * (1 - eps) + 0.5 * eps`
-      (ai-gen-detection/train.py:103-105);
-    - optionally swaps the random sampler for a balanced one.
-    """
 
     def __init__(
         self,

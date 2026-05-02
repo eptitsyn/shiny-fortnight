@@ -1,13 +1,4 @@
-"""One-time index over a feature cache directory.
-
-Scans .pt files (recursively), extracts a small per-shard record
-(path, label-as-y, length, src, split, full meta dict), and caches the
-result to <cache_dir>/_index_v2.pt so subsequent runs start instantly.
-
-Bumping to _v2 because shards now carry a generic `meta` dict alongside
-the legacy `src` field; the new index has an extra column. Old `_index.pt`
-files (if any) are simply ignored.
-"""
+"""One-time index over a feature cache directory."""
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -45,11 +36,6 @@ def _read_meta(path_str: str) -> ShardMeta:
 
 
 def build_index(cache_dir: Path, num_workers: int = 16) -> list[ShardMeta]:
-    """Scan cache_dir for .pt shards (recursively) and return their metadata.
-
-    Cached at <cache_dir>/_index_v2.pt. Delete that file to force a rescan
-    (e.g., after re-extracting features).
-    """
     cache_dir = Path(cache_dir)
     index_file = cache_dir / INDEX_FILENAME
 

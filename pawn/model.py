@@ -14,8 +14,6 @@ class PAWNOutput(ModelOutput):
     logits: Optional[torch.Tensor] = None  # [B] raw logit
 
 
-# ---------- MLP building blocks (mirror src/models/utils/{mlp,seq_batch_norm,activations}.py) ----------
-
 _ACTIVATIONS: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
     "relu": F.relu,
     "gelu": F.gelu,
@@ -60,18 +58,6 @@ def _get_norm_layer(norm_type: str, dim: int) -> nn.Module:
 
 
 class MLP(nn.Module):
-    """Pre-activation MLP with optional residual + per-hidden-layer norm.
-
-    Matches src/models/utils/mlp.py from the original repo:
-
-      x = Linear_0(x)
-      for (Linear_i, Norm_i) in zip(hidden, norms):
-          h = Linear_i(Dropout(Act(x)))
-          x = Norm_i(h + x) if residual else Norm_i(h)
-      return Linear_last(Dropout(Act(x)))
-
-    With num_hidden_layers=0, this collapses to a single Linear(in -> out).
-    """
 
     def __init__(
         self,
@@ -117,32 +103,8 @@ class MLP(nn.Module):
         return self.linear_layers[-1](self.dropout(self.activation_fn(x)))
 
 
-# ---------- PAWN ----------
-
 class PAWN(nn.Module):
-    """Perplexity Attention Weighted Network (Miralles-González et al., 2025).
 
-    Operates on pre-extracted frozen-LLM features:
-      hs_curr:        [B, T, H]  hidden state at position t
-      hs_next:        [B, T, H]  hidden state at position t+1
-      metrics:        [B, T, M]  M raw next-token-distribution metrics
-      attention_mask: [B, T]     1 = valid token, 0 = padding
-
-    Pipeline (matches the original LLMMetricsMLP):
-      1. metrics_nn(metrics) -> [B, T, F]
-      2. gate inputs:
-           [hs_t  (|| hs_{t+1})  || pos_embed]
-         pos_embed = learned Embedding(max_len, P) when pos_embed_dim > 0,
-                     else a single normalized scalar (T_idx / max_len).
-      3. gate_nn -> [B, T, G] with G dividing F. Pad tokens (and randomly
-         dropped tokens during training) get -inf so softmax/sigmoid ignore them.
-      4. If 1 < G < F, repeat gates along feature axis to broadcast to F.
-      5. aggregate over time:
-           - "attention": softmax_t(gates) * processed_metrics, sum_t -> [B, F]
-           - "sigmoid":   sigmoid(gates)   * processed_metrics, sum_t / valid_count
-           - "mean":      mean over valid tokens, no gates -> [B, F]
-      6. aggregate_nn -> [B] logit
-    """
 
     def __init__(
         self,
@@ -170,17 +132,25 @@ class PAWN(nn.Module):
 
         self.aggregation_method = aggregation_method
         self.dropout_tokens = dropout_tokens
-        self.max_len = max_len
         self.concat_consecutive_hidden_states = concat_consecutive_hidden_states
         self.hidden_dim = hidden_dim
         self.num_metrics = num_metrics
+        self.pos_embed_dim = pos_embed_dim
 
+        if pos_embed_dim < 0 or pos_embed_dim % 2 != 0:
+            raise ValueError(
+                f"pos_embed_dim ({pos_embed_dim}) must be a non-negative even integer "
+                f"(sin/cos pairs)"
+            )
         if pos_embed_dim > 0:
-            self.pos_embedding = nn.Embedding(max_len, pos_embed_dim)
+            freqs = torch.arange(1, pos_embed_dim // 2 + 1, dtype=torch.float32) * (
+                2.0 * torch.pi
+            )
+            self.register_buffer("pos_freqs", freqs, persistent=False)
 
         gate_nn_input_dim = (
             (2 if concat_consecutive_hidden_states else 1) * hidden_dim
-            + max(pos_embed_dim, 1)
+            + 2 + pos_embed_dim
         )
         num_gates = num_gates or num_hidden_features
         gate_nn_num_layers = (
@@ -226,12 +196,6 @@ class PAWN(nn.Module):
     # ------------------------------------------------------------------ utils
 
     def _dropout_tokens(self, mask: torch.Tensor) -> torch.Tensor:
-        """mask: [B, T] bool, True where token is pad-or-already-dropped.
-
-        At training time, additionally flip valid tokens to True with
-        probability self.dropout_tokens, but never leave a sample with zero
-        valid tokens (matches the loop in the original implementation).
-        """
         if not self.training or self.dropout_tokens == 0:
             return mask
 
@@ -273,12 +237,17 @@ class PAWN(nn.Module):
         gate_x_list = [hs_curr]
         if self.concat_consecutive_hidden_states:
             gate_x_list.append(hs_next)
-        if hasattr(self, "pos_embedding"):
-            pos = torch.arange(T, device=device)
-            pos_embed = self.pos_embedding(pos).unsqueeze(0).expand(B, -1, -1)
-        else:
-            pos = torch.arange(T, device=device, dtype=hs_curr.dtype) / self.max_len
-            pos_embed = pos.view(1, T, 1).expand(B, T, 1)
+
+        T_actual = (
+            attention_mask.sum(dim=-1, keepdim=True).clamp_min(1).to(hs_curr.dtype)
+        )  # [B, 1]
+        pos_idx = torch.arange(T, device=device, dtype=hs_curr.dtype)  # [T]
+        p = pos_idx.unsqueeze(0) / T_actual  # [B, T] — padding positions get p > 1, masked out downstream
+        pos_feats = [p.unsqueeze(-1), (1.0 - p).unsqueeze(-1)]
+        if self.pos_embed_dim > 0:
+            angles = p.unsqueeze(-1) * self.pos_freqs  # [B, T, K]
+            pos_feats.extend([angles.sin(), angles.cos()])
+        pos_embed = torch.cat(pos_feats, dim=-1)  # [B, T, 2 + pos_embed_dim]
         gate_x_list.append(pos_embed)
         gate_x = torch.cat(gate_x_list, dim=-1)
 
