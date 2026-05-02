@@ -159,7 +159,7 @@ def extract_one(
     if ids.size(1) < cfg.data.min_len:
         return None
 
-    out = model(**enc)
+    out = model(**enc, output_hidden_states=True)
     hs = out.hidden_states[-1][0]
     metrics = compute_metrics_per_token(out.logits[0, :-1], ids[0, 1:])
     hs_curr = hs[:-1]
