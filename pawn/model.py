@@ -103,6 +103,50 @@ class MLP(nn.Module):
         return self.linear_layers[-1](self.dropout(self.activation_fn(x)))
 
 
+class GateConvContext(nn.Module):
+    """Depthwise+pointwise conv stack over time. Mixes neighbor info into gate input.
+
+    Pre-zeros padding so neighbors of valid tokens don't pull from garbage values.
+    Residual update is masked so padded rows pass through unchanged.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        kernel_size: int = 9,
+        num_layers: int = 1,
+        activation: str = "gelu",
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        if kernel_size % 2 == 0:
+            raise ValueError(f"kernel_size ({kernel_size}) must be odd")
+        self.activation_fn = _get_activation_fn(activation)
+        self.dropout = nn.Dropout(dropout)
+        pad = kernel_size // 2
+        self.norms = nn.ModuleList(
+            [nn.LayerNorm(dim, bias=False) for _ in range(num_layers)]
+        )
+        self.dw_convs = nn.ModuleList(
+            [nn.Conv1d(dim, dim, kernel_size, padding=pad, groups=dim) for _ in range(num_layers)]
+        )
+        self.pw_convs = nn.ModuleList(
+            [nn.Conv1d(dim, dim, 1) for _ in range(num_layers)]
+        )
+
+    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        m = attention_mask.unsqueeze(-1).to(x.dtype)  # [B, T, 1]
+        for norm, dw, pw in zip(self.norms, self.dw_convs, self.pw_convs):
+            h = norm(x) * m                       # zero pad rows
+            h = h.transpose(1, 2)                 # [B, D, T]
+            h = dw(h)
+            h = self.activation_fn(h)
+            h = pw(h)
+            h = h.transpose(1, 2)                 # [B, T, D]
+            x = x + self.dropout(h) * m           # mask update so pad rows untouched
+        return x
+
+
 class PAWN(nn.Module):
 
 
@@ -122,6 +166,10 @@ class PAWN(nn.Module):
         concat_consecutive_hidden_states: bool = True,
         pos_embed_dim: int = 0,
         max_len: int = 512,
+        # Gate context (neighbor mixing before gate MLP)
+        gate_context: Literal["none", "conv"] = "none",
+        gate_context_kernel: int = 9,
+        gate_context_layers: int = 1,
         # Aggregation
         aggregation_method: Literal["attention", "sigmoid", "mean"] = "attention",
         # Regularization
@@ -162,6 +210,19 @@ class PAWN(nn.Module):
                 f"num_gates ({num_gates}) must divide num_hidden_features "
                 f"({num_hidden_features})"
             )
+
+        if gate_context == "conv":
+            self.gate_context_nn = GateConvContext(
+                dim=gate_nn_input_dim,
+                kernel_size=gate_context_kernel,
+                num_layers=gate_context_layers,
+                activation=activation,
+                dropout=dropout,
+            )
+        elif gate_context == "none":
+            self.gate_context_nn = None
+        else:
+            raise ValueError(f"Unknown gate_context: {gate_context!r}")
 
         self.gate_nn = MLP(
             input_dim=gate_nn_input_dim,
@@ -250,6 +311,9 @@ class PAWN(nn.Module):
         pos_embed = torch.cat(pos_feats, dim=-1)  # [B, T, 2 + pos_embed_dim]
         gate_x_list.append(pos_embed)
         gate_x = torch.cat(gate_x_list, dim=-1)
+
+        if self.gate_context_nn is not None:
+            gate_x = self.gate_context_nn(gate_x, attention_mask)
 
         # ---- gate logits with masking ----
         gate_mask = self._dropout_tokens(attention_mask == 0)  # [B, T]

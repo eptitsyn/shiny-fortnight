@@ -17,6 +17,11 @@ concat_consecutive_hidden_states: true
 pos_embed_dim: 0             # 0 -> fwd+rev normalized position only; >0 (even) -> add that many sinusoidal Fourier channels
 max_len: ${data.max_len}
 
+# Gate context (neighbor mixing before gate MLP)
+gate_context: none           # none | conv
+gate_context_kernel: 9       # odd; only used when gate_context=conv
+gate_context_layers: 1       # only used when gate_context=conv
+
 # Aggregation
 aggregation_method: attention   # attention | sigmoid | mean
 

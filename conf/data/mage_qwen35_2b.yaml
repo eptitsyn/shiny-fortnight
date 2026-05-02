@@ -1,0 +1,34 @@
+# MAGE dataset + Qwen3.5-2B backbone (hybrid Gated DeltaNet + attention).
+#
+# Model auto-downloads from HF Hub on first use via huggingface_hub
+# (transformers calls it internally). Set HF_HOME to control cache location.
+#
+# Requires recent `transformers` with Qwen3.5 support. If load fails,
+# upgrade transformers or add trust_remote_code=True in load_backbone().
+#
+# Use with:
+#   torchrun --standalone --nproc_per_node=2 extract_features.py data=mage_qwen35_2b
+#   torchrun --standalone --nproc_per_node=2 train.py            data=mage_qwen35_2b
+#
+# Disk budget: ~900 GB for full MAGE train at max_len=1024 in bf16
+# (hidden_dim same as LLaMA-3.2-1B; per-token shard size unchanged).
+# Extract time ~2x LLaMA-3.2-1B (2B vs 1B params).
+
+dataset_name: yaful/MAGE
+
+backbone: Qwen/Qwen3.5-2B
+backbone_tag: qwen35_2b
+
+hidden_dim: 2048
+max_len: 1024
+min_len: 16
+
+cache_dir: ${paths.cache_root}/${data.backbone_tag}
+train_dir: ${data.cache_dir}/train
+eval_dir:  ${data.cache_dir}/validation
+test_dir:  ${data.cache_dir}/test
+
+# See conf/data/mage_gpt2.yaml for an explanation of these fields.
+testbeds: null
+train_filter: null
+eval_filter: null
