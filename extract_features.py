@@ -27,7 +27,9 @@ from datasets import load_dataset
 from omegaconf import DictConfig
 from tqdm.auto import tqdm
 from transformers import (
+    AutoConfig,
     AutoModelForCausalLM,
+    AutoModelForImageTextToText,
     AutoTokenizer,
     PreTrainedModel,
     PreTrainedTokenizerBase,
@@ -96,8 +98,13 @@ def load_backbone(
     tok = AutoTokenizer.from_pretrained(backbone)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+
+    cfg = AutoConfig.from_pretrained(backbone)
+    is_vlm = getattr(cfg, "vision_config", None) is not None
+    model_cls = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
+
     model = (
-        AutoModelForCausalLM.from_pretrained(
+        model_cls.from_pretrained(
             backbone,
             torch_dtype=torch.bfloat16,
             output_hidden_states=True,
