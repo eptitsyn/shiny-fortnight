@@ -81,7 +81,6 @@ def build_training_args(cfg: DictConfig) -> TrainingArguments:
     t = cfg.training
     return TrainingArguments(
         output_dir=t.output_dir,
-        overwrite_output_dir=True,
 
         num_train_epochs=t.num_train_epochs,
         per_device_train_batch_size=t.per_device_train_batch_size,
