@@ -1,5 +1,5 @@
-# Defaults from configs/experiment/mage/llm_metrics_mlp_gpt2.yaml in the
-# original ai-gen-detection repo (paper config for MAGE / GPT-2).
+# MAGE / GPT-2-sized PAWN variant. Mostly follows the original paper config,
+# with a stronger hybrid positional encoding for the gate network.
 
 num_metrics: 5
 
@@ -14,7 +14,8 @@ residual: true
 
 # Gate input composition
 concat_consecutive_hidden_states: true
-pos_embed_dim: 0             # 0 -> fwd+rev normalized position only; >0 (even) -> add that many sinusoidal Fourier channels
+pos_encoding: hybrid         # normalized | fourier | learned | hybrid
+pos_embed_dim: 32            # learned/hybrid absolute-position channels; fourier requires an even value
 max_len: ${data.max_len}
 
 # Gate context (neighbor mixing before gate MLP)
@@ -24,6 +25,13 @@ gate_context_layers: 1       # only used when gate_context=conv
 
 # Aggregation
 aggregation_method: attention   # attention | sigmoid | mean
+
+# Metric-sequence DFT features. Computed in PAWN from cached metric channels,
+# so toggling this does not require re-extraction.
+dft_features: false
+dft_num_bins: 8
+dft_metric_indices: null        # null -> all metric channels
+dft_log_scale: true
 
 # Regularization
 dropout: 0.0

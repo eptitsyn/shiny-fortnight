@@ -63,7 +63,9 @@ def shard_indices(n: int, rank: int, world: int) -> list[int]:
 
 @torch.no_grad()
 def compute_metrics_per_token(
-    logits: torch.Tensor, target_ids: torch.Tensor
+    logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    observer_logits: torch.Tensor | None = None,
 ) -> torch.Tensor:
     log_probs = F.log_softmax(logits.float(), dim=-1)
     probs = log_probs.exp()
@@ -79,9 +81,15 @@ def compute_metrics_per_token(
     quantile = greater_mask.mean(dim=-1)
     top_p = (probs * greater_mask).sum(-1)
 
-    return torch.stack(
-        [entropy, max_log_probs, next_token_log_probs, quantile, top_p], dim=-1
-    )
+    metrics = [entropy, max_log_probs, next_token_log_probs, quantile, top_p]
+
+    if observer_logits is not None:
+        observer_probs = F.softmax(observer_logits.float(), dim=-1)
+        cross_entropy = -(observer_probs * log_probs).sum(-1)
+        binoculars_ratio = (-next_token_log_probs) / cross_entropy.clamp_min(1e-6)
+        metrics.extend([cross_entropy, binoculars_ratio])
+
+    return torch.stack(metrics, dim=-1)
 
 
 def label_to_y(label: int) -> int:
@@ -93,7 +101,7 @@ def row_meta(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_backbone(
-    backbone: str, device: torch.device
+    backbone: str, device: torch.device, *, output_hidden_states: bool = True
 ) -> tuple[PreTrainedTokenizerBase, PreTrainedModel]:
     tok = AutoTokenizer.from_pretrained(backbone)
     if tok.pad_token is None:
@@ -107,7 +115,7 @@ def load_backbone(
         model_cls.from_pretrained(
             backbone,
             torch_dtype=torch.bfloat16,
-            output_hidden_states=True,
+            output_hidden_states=output_hidden_states,
         )
         .to(device)
         .eval()
@@ -142,6 +150,7 @@ def async_saver(num_workers: int, max_pending: int) -> Iterator[SubmitFn]:
 @torch.no_grad()
 def extract_one(
     model: PreTrainedModel,
+    observer_model: PreTrainedModel | None,
     tok: PreTrainedTokenizerBase,
     row: dict[str, Any],
     cfg: DictConfig,
@@ -161,7 +170,11 @@ def extract_one(
 
     out = model(**enc, output_hidden_states=True)
     hs = out.hidden_states[-1][0]
-    metrics = compute_metrics_per_token(out.logits[0, :-1], ids[0, 1:])
+    observer_logits = None
+    if observer_model is not None:
+        observer_out = observer_model(**enc, output_hidden_states=False)
+        observer_logits = observer_out.logits[0, :-1]
+    metrics = compute_metrics_per_token(out.logits[0, :-1], ids[0, 1:], observer_logits)
     hs_curr = hs[:-1]
     hs_next = hs[1:]
 
@@ -170,6 +183,19 @@ def extract_one(
         "hs_next": hs_next.to(torch.float16).cpu().contiguous(),
         "metrics": metrics.to(torch.float16).cpu().contiguous(),
         "length": int(hs_curr.size(0)),
+        "metric_names": (
+            ["entropy", "max_log_probs", "next_token_log_probs", "quantile", "top_p"]
+            if observer_model is None
+            else [
+                "entropy",
+                "max_log_probs",
+                "next_token_log_probs",
+                "quantile",
+                "top_p",
+                "binoculars_cross_entropy",
+                "binoculars_ratio",
+            ]
+        ),
         "y": label_to_y(row["label"]),
         "src": row.get("src", ""),
         "split": split,
@@ -185,6 +211,24 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tok, model = load_backbone(cfg.data.backbone, device)
+    observer_name = cfg.data.get("binoculars_observer_backbone")
+    observer_model = None
+    if observer_name:
+        if cfg.data.get("binoculars_performer_backbone", cfg.data.backbone) != cfg.data.backbone:
+            raise ValueError(
+                "binoculars_performer_backbone must match data.backbone in cached "
+                "PAWN extraction; set data.backbone to the performer model."
+            )
+        observer_tok, observer_model = load_backbone(
+            observer_name, device, output_hidden_states=False
+        )
+        if observer_tok.get_vocab() != tok.get_vocab():
+            raise ValueError(
+                "Binoculars observer and performer tokenizers must have identical vocabularies"
+            )
+        log.info(
+            f"[rank {rank}] binoculars observer={observer_name} performer={cfg.data.backbone}"
+        )
 
     ds = load_dataset(cfg.data.dataset_name, split=split)
     if cfg.extract.limit:
@@ -209,7 +253,7 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
                 skipped += 1
                 continue
 
-            payload = extract_one(model, tok, ds[idx], cfg, split, device)
+            payload = extract_one(model, observer_model, tok, ds[idx], cfg, split, device)
             if payload is None:
                 continue
             submit(out_path, payload)

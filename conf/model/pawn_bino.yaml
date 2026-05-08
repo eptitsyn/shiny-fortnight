@@ -1,0 +1,41 @@
+# PAWN with extra Binoculars metric channels.
+#
+# Requires caches extracted with data=mage_qwen35_2b_bino or another config
+# that writes 7 metric channels in the same order.
+
+num_metrics: 7
+
+# MLP shape
+num_hidden_features: 384
+num_hidden_layers: 3
+gate_nn_num_layers: null
+num_gates: null
+activation: gelu
+norm_type: layer
+residual: true
+
+# Gate input composition
+concat_consecutive_hidden_states: true
+pos_encoding: hybrid
+pos_embed_dim: 32
+max_len: ${data.max_len}
+
+# Gate context (neighbor mixing before gate MLP)
+gate_context: conv
+gate_context_kernel: 9
+gate_context_layers: 1
+
+# Aggregation
+aggregation_method: attention
+
+# Metric-sequence DFT features. Computed in PAWN from cached metric channels,
+# so toggling this does not require re-extraction. Default focuses on the
+# probability/Binoculars channels and avoids entropy/max-log-prob redundancy.
+dft_features: true
+dft_num_bins: 8
+dft_metric_indices: [2, 3, 4, 5, 6]
+dft_log_scale: true
+
+# Regularization
+dropout: 0.05
+dropout_tokens: 0.15

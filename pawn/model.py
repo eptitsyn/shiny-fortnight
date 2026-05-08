@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional
+from typing import Callable, Literal, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -164,6 +164,7 @@ class PAWN(nn.Module):
         residual: bool = True,
         # Gate input composition
         concat_consecutive_hidden_states: bool = True,
+        pos_encoding: Literal["normalized", "fourier", "learned", "hybrid"] = "hybrid",
         pos_embed_dim: int = 0,
         max_len: int = 512,
         # Gate context (neighbor mixing before gate MLP)
@@ -172,6 +173,11 @@ class PAWN(nn.Module):
         gate_context_layers: int = 1,
         # Aggregation
         aggregation_method: Literal["attention", "sigmoid", "mean"] = "attention",
+        # Metric-sequence DFT features
+        dft_features: bool = False,
+        dft_num_bins: int = 8,
+        dft_metric_indices: Sequence[int] | None = None,
+        dft_log_scale: bool = True,
         # Regularization
         dropout: float = 0.0,
         dropout_tokens: float = 0.15,
@@ -183,22 +189,62 @@ class PAWN(nn.Module):
         self.concat_consecutive_hidden_states = concat_consecutive_hidden_states
         self.hidden_dim = hidden_dim
         self.num_metrics = num_metrics
+        self.pos_encoding = pos_encoding
         self.pos_embed_dim = pos_embed_dim
+        self.max_len = max_len
+        self.dft_features = dft_features
+        self.dft_num_bins = int(dft_num_bins)
+        self.dft_log_scale = dft_log_scale
 
-        if pos_embed_dim < 0 or pos_embed_dim % 2 != 0:
+        if dft_metric_indices is None:
+            dft_metric_indices = tuple(range(num_metrics))
+        self.dft_metric_indices = tuple(int(i) for i in dft_metric_indices)
+        if self.dft_features:
+            if self.dft_num_bins <= 0:
+                raise ValueError(
+                    f"dft_num_bins ({self.dft_num_bins}) must be > 0 when "
+                    "dft_features=true"
+                )
+            invalid = [i for i in self.dft_metric_indices if i < 0 or i >= num_metrics]
+            if invalid:
+                raise ValueError(
+                    f"dft_metric_indices contains out-of-range indices {invalid}; "
+                    f"num_metrics={num_metrics}"
+                )
+
+        if pos_embed_dim < 0:
             raise ValueError(
-                f"pos_embed_dim ({pos_embed_dim}) must be a non-negative even integer "
-                f"(sin/cos pairs)"
+                f"pos_embed_dim ({pos_embed_dim}) must be a non-negative integer"
             )
-        if pos_embed_dim > 0:
+        if pos_encoding not in {"normalized", "fourier", "learned", "hybrid"}:
+            raise ValueError(f"Unknown pos_encoding: {pos_encoding!r}")
+        if pos_encoding in {"learned", "hybrid"} and pos_embed_dim <= 0:
+            raise ValueError(
+                f"pos_embed_dim ({pos_embed_dim}) must be > 0 when "
+                f"pos_encoding={pos_encoding!r}"
+            )
+        if pos_encoding == "fourier" and pos_embed_dim % 2 != 0:
+            raise ValueError(
+                f"pos_embed_dim ({pos_embed_dim}) must be even when "
+                f"pos_encoding='fourier' (sin/cos pairs)"
+            )
+        if pos_encoding == "fourier" and pos_embed_dim > 0:
             freqs = torch.arange(1, pos_embed_dim // 2 + 1, dtype=torch.float32) * (
                 2.0 * torch.pi
             )
             self.register_buffer("pos_freqs", freqs, persistent=False)
+        if pos_encoding in {"learned", "hybrid"}:
+            self.pos_embedding = nn.Embedding(max_len, pos_embed_dim)
+
+        pos_input_dim = 2
+        if pos_encoding in {"fourier", "learned"}:
+            pos_input_dim += pos_embed_dim
+        elif pos_encoding == "hybrid":
+            pos_input_dim += pos_embed_dim + 1
 
         gate_nn_input_dim = (
             (2 if concat_consecutive_hidden_states else 1) * hidden_dim
-            + 2 + pos_embed_dim
+            + pos_input_dim
         )
         num_gates = num_gates or num_hidden_features
         gate_nn_num_layers = (
@@ -234,8 +280,12 @@ class PAWN(nn.Module):
             norm_type=norm_type,
             residual=residual,
         )
+        metrics_input_dim = num_metrics
+        if self.dft_features:
+            metrics_input_dim += self.dft_num_bins * len(self.dft_metric_indices)
+
         self.metrics_nn = MLP(
-            input_dim=num_metrics,
+            input_dim=metrics_input_dim,
             output_dim=num_hidden_features,
             num_hidden_layers=num_hidden_layers,
             activation=activation,
@@ -269,6 +319,30 @@ class PAWN(nn.Module):
             final_mask = dropout_mask | mask
         return final_mask
 
+    def _append_dft_features(
+        self, metrics: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
+        if not self.dft_features:
+            return metrics
+
+        x = metrics[..., self.dft_metric_indices].float()  # [B, T, C]
+        mask = attention_mask.unsqueeze(-1).to(x.dtype)
+        lengths = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+        mean = (x * mask).sum(dim=1, keepdim=True) / lengths
+        centered = (x - mean) * mask
+
+        spectrum = torch.fft.rfft(centered, dim=1, norm="ortho").abs()
+        spectrum = spectrum[:, 1 : self.dft_num_bins + 1]  # skip near-zero DC bin
+        if spectrum.size(1) < self.dft_num_bins:
+            pad = self.dft_num_bins - spectrum.size(1)
+            spectrum = F.pad(spectrum, (0, 0, 0, pad))
+        if self.dft_log_scale:
+            spectrum = torch.log1p(spectrum)
+
+        dft = spectrum.flatten(1).to(metrics.dtype)
+        dft = dft.unsqueeze(1).expand(metrics.size(0), metrics.size(1), -1)
+        return torch.cat([metrics, dft], dim=-1)
+
     @torch.no_grad()
     def num_trainable_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -285,6 +359,7 @@ class PAWN(nn.Module):
         B, T, _ = hs_curr.shape
         device = hs_curr.device
 
+        metrics = self._append_dft_features(metrics, attention_mask)
         processed_metrics = self.metrics_nn(metrics)  # [B, T, F]
 
         if self.aggregation_method == "mean":
@@ -305,10 +380,18 @@ class PAWN(nn.Module):
         pos_idx = torch.arange(T, device=device, dtype=hs_curr.dtype)  # [T]
         p = pos_idx.unsqueeze(0) / T_actual  # [B, T] — padding positions get p > 1, masked out downstream
         pos_feats = [p.unsqueeze(-1), (1.0 - p).unsqueeze(-1)]
-        if self.pos_embed_dim > 0:
+        if self.pos_encoding == "fourier" and self.pos_embed_dim > 0:
             angles = p.unsqueeze(-1) * self.pos_freqs  # [B, T, K]
             pos_feats.extend([angles.sin(), angles.cos()])
-        pos_embed = torch.cat(pos_feats, dim=-1)  # [B, T, 2 + pos_embed_dim]
+        elif self.pos_encoding in {"learned", "hybrid"}:
+            pos_ids = torch.arange(T, device=device).clamp_max(self.max_len - 1)
+            pos_abs = self.pos_embedding(pos_ids).unsqueeze(0).expand(B, T, -1)
+            pos_feats.append(pos_abs.to(hs_curr.dtype))
+            if self.pos_encoding == "hybrid":
+                length = T_actual / float(self.max_len)
+                length = length.clamp_max(1.0).unsqueeze(-1).expand(B, T, 1)
+                pos_feats.append(length)
+        pos_embed = torch.cat(pos_feats, dim=-1)
         gate_x_list.append(pos_embed)
         gate_x = torch.cat(gate_x_list, dim=-1)
 

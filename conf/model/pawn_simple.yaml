@@ -1,7 +1,6 @@
-# Smaller variant matching configs/model/llm_metrics_mlp.yaml in the original
-# ai-gen-detection repo (the base, non-MAGE-tuned defaults: 128 features,
-# 1 hidden layer, learned positional embeddings of dim 16, dropout 0.1,
-# 3 metrics instead of 5).
+# Smaller PAWN variant based on the original base config: 128 features,
+# 1 hidden layer, dropout 0.1, and 3 metrics instead of 5. Uses the same
+# hybrid positional encoding as the larger default.
 
 num_metrics: 3
 
@@ -16,7 +15,8 @@ residual: true
 
 # Gate input composition
 concat_consecutive_hidden_states: false
-pos_embed_dim: 16            # 0 -> fwd+rev normalized position only; >0 (even) -> add that many sinusoidal Fourier channels
+pos_encoding: hybrid         # normalized | fourier | learned | hybrid
+pos_embed_dim: 16            # learned/hybrid absolute-position channels; fourier requires an even value
 max_len: ${data.max_len}
 
 # Gate context (neighbor mixing before gate MLP)
@@ -26,6 +26,13 @@ gate_context_layers: 1       # only used when gate_context=conv
 
 # Aggregation
 aggregation_method: attention   # attention | sigmoid | mean
+
+# Metric-sequence DFT features. Computed in PAWN from cached metric channels,
+# so toggling this does not require re-extraction.
+dft_features: false
+dft_num_bins: 8
+dft_metric_indices: null        # null -> all metric channels
+dft_log_scale: true
 
 # Regularization
 dropout: 0.1

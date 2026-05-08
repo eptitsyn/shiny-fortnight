@@ -47,10 +47,9 @@ from omegaconf import DictConfig, OmegaConf
 from scipy.special import expit
 from sklearn.metrics import roc_auc_score, roc_curve
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from eval import build_model, load_state_dict
-from extract_features import compute_metrics_per_token
+from extract_features import compute_metrics_per_token, load_backbone
 from pawn.metrics import compute_metrics
 
 log = logging.getLogger(__name__)
@@ -116,6 +115,7 @@ def predict_loop(
     *,
     tok,
     backbone,
+    observer_backbone,
     pawn,
     device: torch.device,
     max_len: int,
@@ -178,6 +178,10 @@ def predict_loop(
 
         with autocast_ctx:
             out = backbone(input_ids=ids, attention_mask=am_full)
+            observer_logits = None
+            if observer_backbone is not None:
+                observer_out = observer_backbone(input_ids=ids, attention_mask=am_full)
+                observer_logits = observer_out.logits[:, :-1]
         hs = out.hidden_states[-1]      # [B, T, H]
         bb_logits = out.logits          # [B, T, V]
 
@@ -190,7 +194,7 @@ def predict_loop(
         hs_next = hs[:, 1:]
         attn_mask = am_full[:, 1:]
 
-        metrics = compute_metrics_per_token(bb_logits, target)
+        metrics = compute_metrics_per_token(bb_logits, target, observer_logits)
         pawn_out = pawn(
             hs_curr=hs_curr.float(),
             hs_next=hs_next.float(),
@@ -315,18 +319,20 @@ def main(cfg: DictConfig) -> None:
     log.info(f"PAWN params: {pawn.num_trainable_params() / 1e6:.2f}M")
 
     log.info(f"loading frozen backbone {cfg.data.backbone}")
-    tok = AutoTokenizer.from_pretrained(cfg.data.backbone)
-    if tok.pad_token is None:
-        tok.pad_token = tok.eos_token
-    backbone = (
-        AutoModelForCausalLM.from_pretrained(
-            cfg.data.backbone,
-            torch_dtype=torch.bfloat16,
-            output_hidden_states=True,
+    tok, backbone = load_backbone(cfg.data.backbone, device)
+    observer_backbone = None
+    observer_name = cfg.data.get("binoculars_observer_backbone")
+    if observer_name:
+        observer_tok, observer_backbone = load_backbone(
+            observer_name, device, output_hidden_states=False
         )
-        .to(device)
-        .eval()
-    )
+        if observer_tok.get_vocab() != tok.get_vocab():
+            raise ValueError(
+                "Binoculars observer and performer tokenizers must have identical vocabularies"
+            )
+        log.info(
+            f"loading Binoculars observer={observer_name} performer={cfg.data.backbone}"
+        )
 
     log.info(
         f"loading RAID  name={raid_dataset}  config={raid_config}  split={raid_split}"
@@ -366,6 +372,7 @@ def main(cfg: DictConfig) -> None:
         ds,
         tok=tok,
         backbone=backbone,
+        observer_backbone=observer_backbone,
         pawn=pawn,
         device=device,
         max_len=cfg.data.max_len,

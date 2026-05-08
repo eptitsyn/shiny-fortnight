@@ -1,6 +1,6 @@
 defaults:
-  - data: mage_gpt2
-  - model: pawn_small
+  - data: mage_qwen35_2b_bino
+  - model: pawn_bino
   - training: default
   - extract: default
   - _self_
@@ -8,7 +8,7 @@ defaults:
 # Top-level paths every component reads
 paths:
   cache_root: ${oc.env:PAWN_CACHE,${hydra:runtime.cwd}/cache}
-  run_root:   ${oc.env:PAWN_RUNS,${hydra:runtime.cwd}/runs}
+  run_root: ${oc.env:PAWN_RUNS,${hydra:runtime.cwd}/runs}
 
 seed: 42
 
