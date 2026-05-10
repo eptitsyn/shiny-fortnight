@@ -2,5 +2,9 @@ device: cuda
 limit: null
 splits: [train, validation, test]
 
+model_dtype: bfloat16
+feature_dtype: float16
+metrics_dtype: float16
+
 num_io_workers: 16
 prefetch_factor: 4

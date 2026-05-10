@@ -1,0 +1,16 @@
+defaults:
+  - mage_llama
+  - _self_
+
+train_models: ???
+test_models: ???
+
+train_filter:
+  model: ${data.train_models}
+eval_filter:
+  model: ${data.train_models}
+testbeds:
+  tb5_ood_model:
+    dir: ${data.test_dir}
+    filter:
+      model: ${data.test_models}

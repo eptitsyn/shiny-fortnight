@@ -1,0 +1,16 @@
+defaults:
+  - mage_llama
+  - _self_
+
+train_sources: ???
+test_sources: ???
+
+train_filter:
+  source: ${data.train_sources}
+eval_filter:
+  source: ${data.train_sources}
+testbeds:
+  tb6_ood_domain:
+    dir: ${data.test_dir}
+    filter:
+      source: ${data.test_sources}

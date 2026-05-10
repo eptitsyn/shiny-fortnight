@@ -22,7 +22,7 @@ from transformers import (
 )
 
 from eval import load_state_dict
-from extract_features import compute_metrics_per_token
+from extract_features import compute_metrics_per_token, dtype_from_name
 from train import build_model
 
 
@@ -132,17 +132,17 @@ def read_texts(path: Path, one_per_line: bool) -> list[str]:
 def load_backbone_for_inference(
     backbone: str,
     device: torch.device,
+    model_dtype: torch.dtype,
 ) -> tuple[PreTrainedTokenizerBase, PreTrainedModel]:
     tok = AutoTokenizer.from_pretrained(backbone)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     model = cast(
         PreTrainedModel,
         AutoModelForCausalLM.from_pretrained(
             backbone,
-            torch_dtype=dtype,
+            torch_dtype=model_dtype,
             output_hidden_states=True,
         ),
     )
@@ -176,7 +176,12 @@ def text_to_features(
 
     out = backbone(**enc)
     hs = out.hidden_states[-1][0]
-    metrics = compute_metrics_per_token(out.logits[0, :-1], ids[0, 1:])
+    metrics_dtype = dtype_from_name(str(cfg.extract.get("metrics_dtype", "float32")))
+    metrics = compute_metrics_per_token(
+        out.logits[0, :-1],
+        ids[0, 1:],
+        metrics_dtype=metrics_dtype,
+    )
     length = min(int(hs.size(0) - 1), int(cfg.data.max_len))
 
     return {
@@ -204,7 +209,8 @@ def predict_texts(
         )
     pawn.eval()
 
-    tok, backbone = load_backbone_for_inference(str(cfg.data.backbone), device)
+    model_dtype = dtype_from_name(str(cfg.extract.get("model_dtype", "float32")))
+    tok, backbone = load_backbone_for_inference(str(cfg.data.backbone), device, model_dtype)
 
     results: list[dict[str, Any]] = []
     autocast_ctx = (

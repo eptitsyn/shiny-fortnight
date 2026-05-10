@@ -28,6 +28,25 @@ log = logging.getLogger(__name__)
 
 _META_OK = (str, int, float, bool, type(None))
 SubmitFn = Callable[[Path, dict[str, Any]], None]
+_DTYPES = {
+    "float32": torch.float32,
+    "fp32": torch.float32,
+    "float": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "bf16": torch.bfloat16,
+    "float16": torch.float16,
+    "fp16": torch.float16,
+    "half": torch.float16,
+}
+
+
+def dtype_from_name(name: str) -> torch.dtype:
+    key = str(name).lower()
+    try:
+        return _DTYPES[key]
+    except KeyError as exc:
+        allowed = ", ".join(sorted(_DTYPES))
+        raise ValueError(f"unknown dtype {name!r}; expected one of: {allowed}") from exc
 
 
 def ddp_info() -> tuple[int, int, int]:
@@ -42,9 +61,14 @@ def shard_indices(n: int, rank: int, world: int) -> list[int]:
 
 
 @torch.no_grad()
-def compute_metrics_per_token(logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
+def compute_metrics_per_token(
+    logits: torch.Tensor,
+    target_ids: torch.Tensor,
+    *,
+    metrics_dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
     """Return [entropy, max_log_prob, target_log_prob, quantile, top_p] per token."""
-    log_probs = F.log_softmax(logits.float(), dim=-1)
+    log_probs = F.log_softmax(logits.to(metrics_dtype), dim=-1)
     probs = log_probs.exp()
 
     target = target_ids.unsqueeze(-1)
@@ -70,7 +94,7 @@ def row_meta(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_backbone(
-    backbone: str, device: torch.device
+    backbone: str, device: torch.device, model_dtype: torch.dtype
 ) -> tuple[PreTrainedTokenizerBase, PreTrainedModel]:
     tok = AutoTokenizer.from_pretrained(backbone)
     if tok.pad_token is None:
@@ -79,7 +103,7 @@ def load_backbone(
         PreTrainedModel,
         AutoModelForCausalLM.from_pretrained(
             backbone,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=model_dtype,
             output_hidden_states=True,
         ),
     )
@@ -134,12 +158,18 @@ def extract_one(
 
     out = model(**enc)
     hs = out.hidden_states[-1][0]
-    metrics = compute_metrics_per_token(out.logits[0, :-1], ids[0, 1:])
+    metrics_dtype = dtype_from_name(str(cfg.extract.metrics_dtype))
+    feature_dtype = dtype_from_name(str(cfg.extract.feature_dtype))
+    metrics = compute_metrics_per_token(
+        out.logits[0, :-1],
+        ids[0, 1:],
+        metrics_dtype=metrics_dtype,
+    )
 
     return {
-        "hs_curr": hs[:-1].to(torch.float16).cpu().contiguous(),
-        "hs_next": hs[1:].to(torch.float16).cpu().contiguous(),
-        "metrics": metrics.to(torch.float16).cpu().contiguous(),
+        "hs_curr": hs[:-1].to(feature_dtype).cpu().contiguous(),
+        "hs_next": hs[1:].to(feature_dtype).cpu().contiguous(),
+        "metrics": metrics.to(metrics_dtype).cpu().contiguous(),
         "length": int(hs.size(0) - 1),
         "y": label_to_y(row["label"]),
         "src": row.get("src", ""),
@@ -155,7 +185,8 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
     out_dir = Path(str(cfg.data.cache_dir)) / split
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tok, model = load_backbone(str(cfg.data.backbone), device)
+    model_dtype = dtype_from_name(str(cfg.extract.model_dtype))
+    tok, model = load_backbone(str(cfg.data.backbone), device, model_dtype)
     ds = load_dataset(str(cfg.data.dataset_name), split=split)
     if cfg.extract.limit:
         ds = ds.select(range(int(cfg.extract.limit)))

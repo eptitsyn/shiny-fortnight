@@ -1,0 +1,11 @@
+defaults:
+  - mage_llama
+  - _self_
+
+testbeds:
+  tb4_in_distribution:
+    dir: ${data.cache_dir}/test
+  tb7_unseen_domains_model:
+    dir: ${data.cache_dir}/test_ood_gpt
+  tb8_paraphrase:
+    dir: ${data.cache_dir}/test_ood_gpt_para

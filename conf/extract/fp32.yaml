@@ -1,0 +1,7 @@
+defaults:
+  - default
+  - _self_
+
+model_dtype: float32
+feature_dtype: float32
+metrics_dtype: float32
