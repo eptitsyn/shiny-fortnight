@@ -1,0 +1,6 @@
+A list of the Civilisations & Independent Powers/City states in Civ 7 & previous games, this time covering the whole world.
+I also added in red a few notable polities, that are here mostly to fill some geographic/historic/political gaps.
+
+It was interesting reading about the history of the different regions of the world, there are so many civilizations that could be featured in the game, so many that we'll definitely need modders to help fill the gaps.
+
+I used Firaxis age classification to create this map, which is why Portugal is in the Modern age rather than being an Exploration age power. The result is somewhat awkward eras, especially for civs that existed around the two eras.

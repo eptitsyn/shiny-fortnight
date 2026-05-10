@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Reimplementation of PAWN — *Perplexity Attention Weighted Network* (Miralles-González et al., 2025, [arXiv:2501.03940](https://arxiv.org/pdf/2501.03940)) — for AI-generated text detection on MAGE.
 

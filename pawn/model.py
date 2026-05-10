@@ -89,7 +89,10 @@ class MLP(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
         self.norm_layers = nn.ModuleList(
-            [_get_norm_layer(norm_type, hidden_dim) for _ in range(num_hidden_layers - 1)]
+            [
+                _get_norm_layer(norm_type, hidden_dim)
+                for _ in range(num_hidden_layers - 1)
+            ]
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -259,7 +262,9 @@ class PAWN(nn.Module):
             pooled = (gate_logits.softmax(dim=-2) * processed_metrics).sum(dim=-2)
         elif self.aggregation_method == "sigmoid":
             valid_count = attention_mask.sum(dim=-1, keepdim=True).clamp_min(1)
-            pooled = (gate_logits.sigmoid() * processed_metrics).sum(dim=-2) / valid_count
+            pooled = (gate_logits.sigmoid() * processed_metrics).sum(
+                dim=-2
+            ) / valid_count
         else:
             raise ValueError(f"Unknown aggregation_method: {self.aggregation_method!r}")
 

@@ -96,32 +96,32 @@ def _build_eval_datasets(cfg: DictConfig) -> CachedFeatureDataset | dict[str, Ca
 def _training_args_kwargs(cfg: DictConfig) -> dict[str, Any]:
     t = cfg.training
     return dict(
-        output_dir=str(t.output_dir),
-        num_train_epochs=float(t.num_train_epochs),
-        per_device_train_batch_size=int(t.per_device_train_batch_size),
-        per_device_eval_batch_size=int(t.per_device_eval_batch_size),
-        gradient_accumulation_steps=int(t.gradient_accumulation_steps),
-        learning_rate=float(t.learning_rate),
-        weight_decay=float(t.weight_decay),
-        warmup_steps=int(t.warmup_steps),
-        lr_scheduler_type=str(t.lr_scheduler_type),
-        max_grad_norm=float(t.max_grad_norm),
-        eval_strategy=str(t.eval_strategy),
-        save_strategy=str(t.save_strategy),
-        save_total_limit=int(t.save_total_limit),
+        output_dir=t.output_dir,
+        num_train_epochs=t.num_train_epochs,
+        per_device_train_batch_size=t.per_device_train_batch_size,
+        per_device_eval_batch_size=t.per_device_eval_batch_size,
+        gradient_accumulation_steps=t.gradient_accumulation_steps,
+        learning_rate=t.learning_rate,
+        weight_decay=t.weight_decay,
+        warmup_steps=t.warmup_steps,
+        lr_scheduler_type=t.lr_scheduler_type,
+        max_grad_norm=t.max_grad_norm,
+        eval_strategy=t.eval_strategy,
+        save_strategy=t.save_strategy,
+        save_total_limit=t.save_total_limit,
         load_best_model_at_end=True,
-        metric_for_best_model=str(t.metric_for_best_model),
-        greater_is_better=bool(t.greater_is_better),
+        metric_for_best_model=t.metric_for_best_model,
+        greater_is_better=t.greater_is_better,
         logging_strategy="steps",
-        logging_steps=int(t.logging_steps),
+        logging_steps=t.logging_steps,
         logging_first_step=True,
         report_to=_to_plain(t.report_to),
         bf16=t.bf16 and torch.cuda.is_available(),
-        dataloader_num_workers=int(t.dataloader_num_workers),
+        dataloader_num_workers=t.dataloader_num_workers,
         dataloader_pin_memory=t.dataloader_pin_memory and torch.cuda.is_available(),
         remove_unused_columns=False,
         label_names=["labels"],
-        seed=int(cfg.seed),
+        seed=cfg.seed,
         disable_tqdm=False,
     )
 
@@ -137,8 +137,8 @@ def build_training_args(cfg: DictConfig) -> TrainingArguments:
             os.path.join(str(cfg.training.output_dir), "tb"),
         )
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
-        kwargs["ddp_find_unused_parameters"] = bool(cfg.training.ddp_find_unused_parameters)
-        kwargs["ddp_backend"] = str(cfg.training.ddp_backend)
+        kwargs["ddp_find_unused_parameters"] = cfg.training.ddp_find_unused_parameters
+        kwargs["ddp_backend"] = cfg.training.ddp_backend
     return TrainingArguments(**kwargs)
 
 
@@ -160,8 +160,8 @@ class PAWNTrainer(Trainer):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.label_smoothing = float(label_smoothing)
-        self._pos_weight = float(pos_weight)
+        self.label_smoothing = label_smoothing
+        self._pos_weight = pos_weight
         self._train_sampler = train_sampler
 
     def _get_train_sampler(self, train_dataset=None):
@@ -197,25 +197,25 @@ class PAWNTrainer(Trainer):
 
 def build_model(cfg: DictConfig) -> PAWN:
     return PAWN(
-        hidden_dim=int(cfg.data.hidden_dim),
-        num_metrics=int(cfg.model.num_metrics),
-        num_hidden_features=int(cfg.model.num_hidden_features),
-        num_hidden_layers=int(cfg.model.num_hidden_layers),
+        hidden_dim=cfg.data.hidden_dim,
+        num_metrics=cfg.model.num_metrics,
+        num_hidden_features=cfg.model.num_hidden_features,
+        num_hidden_layers=cfg.model.num_hidden_layers,
         gate_nn_num_layers=(
             None
             if cfg.model.gate_nn_num_layers is None
-            else int(cfg.model.gate_nn_num_layers)
+            else cfg.model.gate_nn_num_layers
         ),
-        num_gates=None if cfg.model.num_gates is None else int(cfg.model.num_gates),
-        activation=str(cfg.model.activation),
-        norm_type=str(cfg.model.norm_type),
-        residual=bool(cfg.model.residual),
-        concat_consecutive_hidden_states=bool(cfg.model.concat_consecutive_hidden_states),
-        pos_embed_dim=int(cfg.model.pos_embed_dim),
-        max_len=int(cfg.model.max_len),
+        num_gates=cfg.model.num_gates,
+        activation=cfg.model.activation,
+        norm_type=cfg.model.norm_type,
+        residual=cfg.model.residual,
+        concat_consecutive_hidden_states=cfg.model.concat_consecutive_hidden_states,
+        pos_embed_dim=cfg.model.pos_embed_dim,
+        max_len=cfg.model.max_len,
         aggregation_method=cfg.model.aggregation_method,
-        dropout=float(cfg.model.dropout),
-        dropout_tokens=float(cfg.model.dropout_tokens),
+        dropout=cfg.model.dropout,
+        dropout_tokens=cfg.model.dropout_tokens,
     )
 
 
@@ -259,11 +259,11 @@ def main(cfg: DictConfig) -> None:
         compute_metrics=compute_metrics,
         callbacks=[
             EarlyStoppingCallback(
-                early_stopping_patience=int(cfg.training.early_stopping_patience),
+                early_stopping_patience=cfg.training.early_stopping_patience,
             )
         ],
-        label_smoothing=float(cfg.training.label_smoothing),
-        pos_weight=float(cfg.training.pos_weight),
+        label_smoothing=cfg.training.label_smoothing,
+        pos_weight=cfg.training.pos_weight,
         train_sampler=sampler,
     )
 
