@@ -219,6 +219,45 @@ def build_model(cfg: DictConfig) -> PAWN:
     )
 
 
+def _extract_best_thresholds(metrics: dict[str, Any]) -> dict[str, float]:
+    thresholds: dict[str, float] = {}
+    for key, value in metrics.items():
+        if not isinstance(value, (int, float)):
+            continue
+        if key == "eval_best_threshold":
+            thresholds["default"] = float(value)
+        elif key.startswith("eval_") and key.endswith("_best_threshold"):
+            name = key.removeprefix("eval_").removesuffix("_best_threshold")
+            thresholds[name] = float(value)
+    return thresholds
+
+
+def _save_cfg_with_thresholds(
+    cfg: DictConfig,
+    output_dir: str,
+    eval_metrics: dict[str, Any],
+) -> None:
+    thresholds = _extract_best_thresholds(eval_metrics)
+    if thresholds:
+        OmegaConf.update(
+            cfg,
+            "model.decision_thresholds",
+            thresholds,
+            merge=False,
+            force_add=True,
+        )
+        if len(thresholds) == 1:
+            OmegaConf.update(
+                cfg,
+                "model.decision_threshold",
+                next(iter(thresholds.values())),
+                merge=False,
+                force_add=True,
+            )
+
+    OmegaConf.save(cfg, os.path.join(output_dir, "config.yaml"))
+
+
 @hydra.main(version_base="1.3", config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     set_seed(cfg.seed)
@@ -269,11 +308,12 @@ def main(cfg: DictConfig) -> None:
 
     trainer.train()
 
-    if is_main_process():
-        trainer.save_model(os.path.join(str(cfg.training.output_dir), "best"))
-
     eval_metrics = trainer.evaluate()
     if is_main_process():
+        best_dir = os.path.join(str(cfg.training.output_dir), "best")
+        trainer.save_model(best_dir)
+        _save_cfg_with_thresholds(cfg, str(cfg.training.output_dir), eval_metrics)
+        _save_cfg_with_thresholds(cfg, best_dir, eval_metrics)
         log.info({k: round(v, 4) for k, v in eval_metrics.items() if isinstance(v, (int, float))})
         with open(os.path.join(str(cfg.training.output_dir), "eval_metrics.json"), "w") as f:
             json.dump(

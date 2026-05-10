@@ -49,8 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.5,
-        help="Probability threshold for the machine/generated label.",
+        default=None,
+        help=(
+            "Probability threshold for the machine/generated label. Defaults to "
+            "model.decision_threshold from config.yaml when present, otherwise 0.5."
+        ),
     )
     parser.add_argument(
         "--one-per-line",
@@ -103,6 +106,20 @@ def load_cfg(config_path: Path | None, checkpoint: Path, overrides: list[str]) -
     conf_dir = Path(__file__).resolve().parent / "conf"
     with hydra.initialize_config_dir(version_base="1.3", config_dir=str(conf_dir)):
         return hydra.compose(config_name="config", overrides=overrides)
+
+
+def decision_threshold(cfg: DictConfig, override: float | None) -> float:
+    if override is not None:
+        return override
+    threshold = cfg.model.get("decision_threshold")
+    if threshold is not None:
+        return float(threshold)
+
+    thresholds = cfg.model.get("decision_thresholds")
+    if thresholds and len(thresholds) == 1:
+        return float(next(iter(thresholds.values())))
+    return 0.5
+
 
 
 def read_texts(path: Path, one_per_line: bool) -> list[str]:
@@ -245,7 +262,7 @@ def main() -> None:
         cfg=cfg,
         checkpoint=args.checkpoint,
         device=device,
-        threshold=args.threshold,
+        threshold=decision_threshold(cfg, args.threshold),
     )
     if args.json:
         print(json.dumps(results, indent=2))
