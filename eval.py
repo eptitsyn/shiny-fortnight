@@ -103,6 +103,8 @@ def build_model(cfg: DictConfig) -> PAWN:
         dft_num_bins=cfg.model.dft_num_bins,
         dft_metric_indices=_to_plain(cfg.model.dft_metric_indices),
         dft_log_scale=cfg.model.dft_log_scale,
+        dft_eps=cfg.model.dft_eps,
+        metrics_clip_value=cfg.model.metrics_clip_value,
         dropout=cfg.model.dropout,
         dropout_tokens=cfg.model.dropout_tokens,
     )

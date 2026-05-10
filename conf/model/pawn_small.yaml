@@ -32,6 +32,8 @@ dft_features: false
 dft_num_bins: 8
 dft_metric_indices: null        # null -> all metric channels
 dft_log_scale: true
+dft_eps: 1e-8
+metrics_clip_value: null
 
 # Regularization
 dropout: 0.0

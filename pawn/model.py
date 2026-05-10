@@ -178,6 +178,8 @@ class PAWN(nn.Module):
         dft_num_bins: int = 8,
         dft_metric_indices: Sequence[int] | None = None,
         dft_log_scale: bool = True,
+        dft_eps: float = 1e-8,
+        metrics_clip_value: float | None = None,
         # Regularization
         dropout: float = 0.0,
         dropout_tokens: float = 0.15,
@@ -195,6 +197,8 @@ class PAWN(nn.Module):
         self.dft_features = dft_features
         self.dft_num_bins = int(dft_num_bins)
         self.dft_log_scale = dft_log_scale
+        self.dft_eps = float(dft_eps)
+        self.metrics_clip_value = metrics_clip_value
 
         if dft_metric_indices is None:
             dft_metric_indices = tuple(range(num_metrics))
@@ -204,6 +208,10 @@ class PAWN(nn.Module):
                 raise ValueError(
                     f"dft_num_bins ({self.dft_num_bins}) must be > 0 when "
                     "dft_features=true"
+                )
+            if self.dft_eps <= 0:
+                raise ValueError(
+                    f"dft_eps ({self.dft_eps}) must be > 0 when dft_features=true"
                 )
             invalid = [i for i in self.dft_metric_indices if i < 0 or i >= num_metrics]
             if invalid:
@@ -322,6 +330,12 @@ class PAWN(nn.Module):
     def _append_dft_features(
         self, metrics: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
+        metrics = torch.nan_to_num(metrics, nan=0.0, posinf=0.0, neginf=0.0)
+        if self.metrics_clip_value is not None:
+            metrics = metrics.clamp(
+                min=-float(self.metrics_clip_value),
+                max=float(self.metrics_clip_value),
+            )
         if not self.dft_features:
             return metrics
 
@@ -331,7 +345,8 @@ class PAWN(nn.Module):
         mean = (x * mask).sum(dim=1, keepdim=True) / lengths
         centered = (x - mean) * mask
 
-        spectrum = torch.fft.rfft(centered, dim=1, norm="ortho").abs()
+        coeffs = torch.fft.rfft(centered, dim=1, norm="ortho")
+        spectrum = torch.sqrt(coeffs.real.square() + coeffs.imag.square() + self.dft_eps)
         spectrum = spectrum[:, 1 : self.dft_num_bins + 1]  # skip near-zero DC bin
         if spectrum.size(1) < self.dft_num_bins:
             pad = self.dft_num_bins - spectrum.size(1)

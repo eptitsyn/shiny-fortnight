@@ -35,6 +35,8 @@ dft_features: true
 dft_num_bins: 8
 dft_metric_indices: [2, 3, 4, 5, 6]
 dft_log_scale: true
+dft_eps: 1e-8
+metrics_clip_value: 100.0
 
 # Regularization
 dropout: 0.05

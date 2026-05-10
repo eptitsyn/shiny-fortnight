@@ -154,10 +154,14 @@ class PAWNTrainer(Trainer):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
+        if not torch.isfinite(logits).all():
+            raise FloatingPointError("PAWN produced non-finite logits")
 
         smoothed = labels.float() * (1.0 - self.label_smoothing) + 0.5 * self.label_smoothing
         pos_weight = torch.tensor(self._pos_weight, device=logits.device, dtype=logits.dtype)
         loss = F.binary_cross_entropy_with_logits(logits, smoothed, pos_weight=pos_weight)
+        if not torch.isfinite(loss):
+            raise FloatingPointError("PAWN loss became non-finite")
 
         # Put labels back so compute_metrics can read them downstream.
         inputs["labels"] = labels
@@ -210,6 +214,8 @@ def main(cfg: DictConfig) -> None:
         dft_num_bins=cfg.model.dft_num_bins,
         dft_metric_indices=_to_plain(cfg.model.dft_metric_indices),
         dft_log_scale=cfg.model.dft_log_scale,
+        dft_eps=cfg.model.dft_eps,
+        metrics_clip_value=cfg.model.metrics_clip_value,
         dropout=cfg.model.dropout,
         dropout_tokens=cfg.model.dropout_tokens,
     )
