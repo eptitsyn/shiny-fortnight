@@ -1,18 +1,12 @@
-# Optimizer / loss defaults follow configs/experiment/mage/{base,llm_metrics_mlp_gpt2}.yaml
-# in the original repo:
-#   lr=1e-3, weight_decay=1e-2, label_smoothing=0.2, pos_weight=0.413,
-#   gradient_clip_val=1.0, max_epochs=5, batch_size=128.
-
 output_dir: ${hydra:runtime.output_dir}
 
 num_train_epochs: 5.0
 learning_rate: 1.0e-3
 weight_decay: 1.0e-2
-warmup_ratio: 0.0          # original repo doesn't warm up; pure cosine
+warmup_steps: 0
 lr_scheduler_type: cosine
 max_grad_norm: 1.0
 
-# Loss (paper-faithful BCE-with-logits + label-smoothing trick)
 label_smoothing: 0.2
 pos_weight: 0.413
 
@@ -25,6 +19,7 @@ dataloader_num_workers: 4
 dataloader_pin_memory: true
 
 logging_steps: 50
+report_to: tensorboard
 eval_strategy: epoch
 save_strategy: epoch
 save_total_limit: 2
@@ -32,10 +27,7 @@ metric_for_best_model: auroc
 greater_is_better: true
 early_stopping_patience: 2
 
-# DDP-specific knobs
 ddp_find_unused_parameters: false
 ddp_backend: nccl
 
-# Original repo trains with pos_weight (not a balanced sampler) on MAGE.
-# Flip to true if you want to compare against the sampler-based variant.
 balanced_sampler: false

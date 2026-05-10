@@ -6,14 +6,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 import torch
-from pawn.index import ShardMeta, build_index
 from torch.utils.data import Dataset
+
+from pawn.index import ShardMeta, build_index
 
 FilterSpec = Callable[[ShardMeta], bool] | dict[str, Any] | None
 
 
 def _shard_field(m: ShardMeta, key: str) -> Any:
-    """Look up `key` on the ShardMeta, falling back to its `meta` dict."""
     if hasattr(m, key) and key != "meta":
         return getattr(m, key)
     return m.meta.get(key)
@@ -21,7 +21,7 @@ def _shard_field(m: ShardMeta, key: str) -> Any:
 
 def _matcher(allowed: Any) -> Callable[[Any], bool]:
     if callable(allowed):
-        return allowed
+        return lambda v: bool(allowed(v))
     if isinstance(allowed, re.Pattern):
         return lambda v: v is not None and bool(allowed.search(str(v)))
     if isinstance(allowed, str) and allowed.startswith("regex:"):
@@ -30,7 +30,6 @@ def _matcher(allowed: Any) -> Callable[[Any], bool]:
     if isinstance(allowed, (list, tuple, set)):
         s = set(allowed)
         return lambda v: v in s
-    # Scalar -> equality
     return lambda v: v == allowed
 
 
@@ -41,18 +40,14 @@ def apply_filter(metas: list[ShardMeta], spec: FilterSpec) -> list[ShardMeta]:
         return [m for m in metas if spec(m)]
 
     matchers = {k: _matcher(v) for k, v in spec.items()}
-
-    def keep(m: ShardMeta) -> bool:
-        for k, match in matchers.items():
-            if not match(_shard_field(m, k)):
-                return False
-        return True
-
-    return [m for m in metas if keep(m)]
+    return [
+        m
+        for m in metas
+        if all(match(_shard_field(m, k)) for k, match in matchers.items())
+    ]
 
 
 class CachedFeatureDataset(Dataset):
-
     def __init__(
         self,
         root: str | Path,
@@ -75,7 +70,6 @@ class CachedFeatureDataset(Dataset):
 
     @property
     def labels(self) -> list[int]:
-        """Cheap accessor used by the balanced sampler."""
         return [m.y for m in self.metas]
 
     @property
@@ -111,7 +105,7 @@ class PAWNCollator:
         hs_curr = torch.zeros(B, T, d)
         hs_next = torch.zeros(B, T, d)
         metrics = torch.zeros(B, T, M)
-        attn_mask = torch.zeros(B, T, dtype=torch.long)
+        attention_mask = torch.zeros(B, T, dtype=torch.long)
         labels = torch.zeros(B, dtype=torch.long)
 
         for i, b in enumerate(batch):
@@ -119,13 +113,13 @@ class PAWNCollator:
             hs_curr[i, :t] = b["hs_curr"]
             hs_next[i, :t] = b["hs_next"]
             metrics[i, :t] = b["metrics"]
-            attn_mask[i, :t] = 1
+            attention_mask[i, :t] = 1
             labels[i] = b["labels"]
 
         return {
             "hs_curr": hs_curr,
             "hs_next": hs_next,
             "metrics": metrics,
-            "attention_mask": attn_mask,
+            "attention_mask": attention_mask,
             "labels": labels,
         }

@@ -44,19 +44,20 @@ def build_index(cache_dir: Path, num_workers: int = 16) -> list[ShardMeta]:
         return [ShardMeta(**r) for r in records]
 
     files = [
-        str(p)
-        for p in cache_dir.rglob("*.pt")
-        if not p.name.startswith("_index")
+        str(p) for p in cache_dir.rglob("*.pt") if not p.name.startswith("_index")
     ]
     files.sort()
 
     metas: list[ShardMeta] = []
-    with ProcessPoolExecutor(max_workers=num_workers) as pool:
-        futures = [pool.submit(_read_meta, f) for f in files]
-        for fut in tqdm(as_completed(futures), total=len(files),
-                        desc=f"index {cache_dir.name}"):
-            metas.append(fut.result())
+    if num_workers <= 1:
+        for f in tqdm(files, total=len(files), desc=f"index {cache_dir.name}"):
+            metas.append(_read_meta(f))
+    else:
+        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            futures = [pool.submit(_read_meta, f) for f in files]
+            for fut in tqdm(as_completed(futures), total=len(files), desc=f"index {cache_dir.name}"):
+                metas.append(fut.result())
 
-    metas.sort(key=lambda m: m.path)  # deterministic order
+    metas.sort(key=lambda m: m.path)
     torch.save([asdict(m) for m in metas], index_file)
     return metas

@@ -1,0 +1,11 @@
+accelerate
+datasets
+hydra-core
+numpy
+safetensors
+scikit-learn
+scipy
+tensorboard
+torch
+tqdm
+transformers

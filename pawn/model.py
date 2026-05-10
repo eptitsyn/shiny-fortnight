@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional
+from typing import Callable, Literal, Optional, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.utils import ModelOutput
+from transformers.utils.generic import ModelOutput
 
 
 @dataclass
 class PAWNOutput(ModelOutput):
-    logits: Optional[torch.Tensor] = None  # [B] raw logit
+    loss: Optional[torch.Tensor] = None
+    logits: Optional[torch.Tensor] = None
 
 
 _ACTIVATIONS: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
@@ -58,7 +59,6 @@ def _get_norm_layer(norm_type: str, dim: int) -> nn.Module:
 
 
 class MLP(nn.Module):
-
     def __init__(
         self,
         input_dim: int,
@@ -104,13 +104,10 @@ class MLP(nn.Module):
 
 
 class PAWN(nn.Module):
-
-
     def __init__(
         self,
         hidden_dim: int,
         num_metrics: int = 5,
-        # MLP shape
         num_hidden_features: int = 256,
         num_hidden_layers: int = 3,
         gate_nn_num_layers: int | None = None,
@@ -118,13 +115,10 @@ class PAWN(nn.Module):
         activation: str = "gelu",
         norm_type: str = "layer",
         residual: bool = True,
-        # Gate input composition
         concat_consecutive_hidden_states: bool = True,
         pos_embed_dim: int = 0,
         max_len: int = 512,
-        # Aggregation
         aggregation_method: Literal["attention", "sigmoid", "mean"] = "attention",
-        # Regularization
         dropout: float = 0.0,
         dropout_tokens: float = 0.15,
     ):
@@ -136,12 +130,10 @@ class PAWN(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_metrics = num_metrics
         self.pos_embed_dim = pos_embed_dim
+        self.max_len = max_len
 
         if pos_embed_dim < 0 or pos_embed_dim % 2 != 0:
-            raise ValueError(
-                f"pos_embed_dim ({pos_embed_dim}) must be a non-negative even integer "
-                f"(sin/cos pairs)"
-            )
+            raise ValueError("pos_embed_dim must be a non-negative even integer")
         if pos_embed_dim > 0:
             freqs = torch.arange(1, pos_embed_dim // 2 + 1, dtype=torch.float32) * (
                 2.0 * torch.pi
@@ -150,7 +142,8 @@ class PAWN(nn.Module):
 
         gate_nn_input_dim = (
             (2 if concat_consecutive_hidden_states else 1) * hidden_dim
-            + 2 + pos_embed_dim
+            + 1
+            + pos_embed_dim
         )
         num_gates = num_gates or num_hidden_features
         gate_nn_num_layers = (
@@ -193,8 +186,6 @@ class PAWN(nn.Module):
             residual=residual,
         )
 
-    # ------------------------------------------------------------------ utils
-
     def _dropout_tokens(self, mask: torch.Tensor) -> torch.Tensor:
         if not self.training or self.dropout_tokens == 0:
             return mask
@@ -212,55 +203,57 @@ class PAWN(nn.Module):
     def num_trainable_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-    # ------------------------------------------------------------------ forward
+    def _position_features(
+        self, batch_size: int, seq_len: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        pos = torch.arange(seq_len, device=device, dtype=dtype) / float(self.max_len)
+        pos = pos.view(1, seq_len, 1).expand(batch_size, seq_len, 1)
+        if self.pos_embed_dim == 0:
+            return pos
+
+        pos_freqs = cast(torch.Tensor, self.pos_freqs)
+        angles = pos * pos_freqs.to(device=device, dtype=dtype)
+        return torch.cat([pos, angles.sin(), angles.cos()], dim=-1)
 
     def forward(
         self,
-        hs_curr: torch.Tensor,           # [B, T, H]
-        hs_next: torch.Tensor,           # [B, T, H]
-        metrics: torch.Tensor,           # [B, T, M]
-        attention_mask: torch.Tensor,    # [B, T]
+        hs_curr: torch.Tensor,
+        hs_next: torch.Tensor,
+        metrics: torch.Tensor,
+        attention_mask: torch.Tensor,
     ) -> PAWNOutput:
         B, T, _ = hs_curr.shape
-        device = hs_curr.device
+        dtype = next(self.metrics_nn.parameters()).dtype
+        hs_curr = hs_curr.to(dtype)
+        hs_next = hs_next.to(dtype)
+        metrics = metrics.to(dtype)
+        if metrics.size(-1) < self.num_metrics:
+            raise ValueError(
+                f"metrics has {metrics.size(-1)} channels, expected at least {self.num_metrics}"
+            )
+        metrics = metrics[..., : self.num_metrics]
 
-        processed_metrics = self.metrics_nn(metrics)  # [B, T, F]
+        processed_metrics = self.metrics_nn(metrics)
 
         if self.aggregation_method == "mean":
             am = attention_mask.float()
             coeffs = am / am.sum(dim=-1, keepdim=True).clamp_min(1.0)
-            pooled = torch.einsum("blf,bl->bf", processed_metrics, coeffs)
-            logits = self.aggregate_nn(pooled).squeeze(-1)
-            return PAWNOutput(logits=logits)
+            pooled = torch.einsum("btf,bt->bf", processed_metrics, coeffs)
+            return PAWNOutput(logits=self.aggregate_nn(pooled).squeeze(-1))
 
-        # ---- gate input ----
         gate_x_list = [hs_curr]
         if self.concat_consecutive_hidden_states:
             gate_x_list.append(hs_next)
-
-        T_actual = (
-            attention_mask.sum(dim=-1, keepdim=True).clamp_min(1).to(hs_curr.dtype)
-        )  # [B, 1]
-        pos_idx = torch.arange(T, device=device, dtype=hs_curr.dtype)  # [T]
-        p = pos_idx.unsqueeze(0) / T_actual  # [B, T] — padding positions get p > 1, masked out downstream
-        pos_feats = [p.unsqueeze(-1), (1.0 - p).unsqueeze(-1)]
-        if self.pos_embed_dim > 0:
-            angles = p.unsqueeze(-1) * self.pos_freqs  # [B, T, K]
-            pos_feats.extend([angles.sin(), angles.cos()])
-        pos_embed = torch.cat(pos_feats, dim=-1)  # [B, T, 2 + pos_embed_dim]
-        gate_x_list.append(pos_embed)
+        gate_x_list.append(self._position_features(B, T, hs_curr.device, hs_curr.dtype))
         gate_x = torch.cat(gate_x_list, dim=-1)
 
-        # ---- gate logits with masking ----
-        gate_mask = self._dropout_tokens(attention_mask == 0)  # [B, T]
-        gate_logits = self.gate_nn(gate_x)                      # [B, T, G]
-        gate_logits = gate_logits.masked_fill(
-            gate_mask.unsqueeze(-1), float("-inf")
-        )
+        gate_mask = self._dropout_tokens(attention_mask == 0)
+        gate_logits = self.gate_nn(gate_x)
+        gate_logits = gate_logits.masked_fill(gate_mask.unsqueeze(-1), float("-inf"))
 
         G, Fdim = gate_logits.size(-1), processed_metrics.size(-1)
         if 1 < G < Fdim:
-            gate_logits = gate_logits.repeat(1, 1, Fdim // G)  # [B, T, F]
+            gate_logits = gate_logits.repeat(1, 1, Fdim // G)
 
         if self.aggregation_method == "attention":
             pooled = (gate_logits.softmax(dim=-2) * processed_metrics).sum(dim=-2)
@@ -270,5 +263,4 @@ class PAWN(nn.Module):
         else:
             raise ValueError(f"Unknown aggregation_method: {self.aggregation_method!r}")
 
-        logits = self.aggregate_nn(pooled).squeeze(-1)
-        return PAWNOutput(logits=logits)
+        return PAWNOutput(logits=self.aggregate_nn(pooled).squeeze(-1))

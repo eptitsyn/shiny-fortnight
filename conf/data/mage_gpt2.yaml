@@ -1,41 +1,15 @@
-# Dataset + backbone choice. Change these together — feature cache and
-# model.hidden_dim must match the backbone.
 dataset_name: yaful/MAGE
 backbone: gpt2
-backbone_tag: gpt2          # short name used in paths
-hidden_dim: 768             # gpt2:768  gpt2-medium:1024  llama3-1b:2048
+backbone_tag: gpt2
+hidden_dim: 768
 max_len: 512
 min_len: 16
 
 cache_dir: ${paths.cache_root}/${data.backbone_tag}
 train_dir: ${data.cache_dir}/train
-eval_dir:  ${data.cache_dir}/validation
-test_dir:  ${data.cache_dir}/test
+eval_dir: ${data.cache_dir}/validation
+test_dir: ${data.cache_dir}/test
 
-# ----- Testbeds (multi-eval) ---------------------------------------------
-# MAGE ships only {train, validation, test} as HF splits and packs all
-# fine-grained domain/model info into a single `src` column (322 unique
-# values). To reproduce the paper's testbeds, slice cached `test` shards
-# by `src`/`y` filters at load time — extract_features.py saves the full
-# row meta into each shard; CachedFeatureDataset(filter=...) does the rest.
-#
-# When `testbeds` is set, train.py evaluates on each entry every eval cycle
-# and HF Trainer prefixes metrics with `eval_<name>_*`. Set
-#   training.metric_for_best_model: "<name>_auroc"
-# to drive best-model selection from a specific testbed.
-#
-# Example (uncomment to use):
-#   testbeds:
-#     validation: { dir: validation }
-#     test:       { dir: test }
-#     test_machine_only: { dir: test, filter: { y: [1] } }
-#     test_human_only:   { dir: test, filter: { y: [0] } }
-#     test_gpt:          { dir: test, filter: { src: "regex:gpt" } }
 testbeds: null
-
-# Optional filter applied at dataset load time. Keys can be ShardMeta
-# fields (y, src, length, split) or anything stored in shard `meta`.
-# Values: list (whitelist), scalar (equality), or "regex:<pattern>".
-# Example: train_filter: { src: "regex:^cmv_" }
 train_filter: null
 eval_filter: null

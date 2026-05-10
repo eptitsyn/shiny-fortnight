@@ -1,14 +1,10 @@
 """
-Feature extraction.
+Feature extraction for PAWN.
 
-torchrun --standalone --nproc_per_node=2 extract_features.py
-python extract_features.py
-
-CLI overrides:
-  torchrun --standalone --nproc_per_node=2 extract_features.py \
-      extract.splits='[validation,test]' extract.num_io_workers=8
+Examples:
+  python extract_features.py
+  torchrun --standalone --nproc_per_node=2 extract_features.py data=mage_gpt2
 """
-
 from __future__ import annotations
 
 import logging
@@ -18,7 +14,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue
-from typing import Any
+from typing import Any, cast
 
 import hydra
 import torch
@@ -26,25 +22,15 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from omegaconf import DictConfig
 from tqdm.auto import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    PreTrainedModel,
-    PreTrainedTokenizerBase,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 log = logging.getLogger(__name__)
 
 _META_OK = (str, int, float, bool, type(None))
-
 SubmitFn = Callable[[Path, dict[str, Any]], None]
 
 
-# ---------- DDP helpers ----------
-
-
 def ddp_info() -> tuple[int, int, int]:
-    """(rank, world_size, local_rank). Works under torchrun or solo."""
     rank = int(os.environ.get("RANK", "0"))
     world = int(os.environ.get("WORLD_SIZE", "1"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -52,17 +38,12 @@ def ddp_info() -> tuple[int, int, int]:
 
 
 def shard_indices(n: int, rank: int, world: int) -> list[int]:
-    """Strided sharding: rank r gets indices r, r+world, r+2*world, ..."""
     return list(range(rank, n, world))
 
 
-# ---------- Per-token metrics ----------
-
-
 @torch.no_grad()
-def compute_metrics_per_token(
-    logits: torch.Tensor, target_ids: torch.Tensor
-) -> torch.Tensor:
+def compute_metrics_per_token(logits: torch.Tensor, target_ids: torch.Tensor) -> torch.Tensor:
+    """Return [entropy, max_log_prob, target_log_prob, quantile, top_p] per token."""
     log_probs = F.log_softmax(logits.float(), dim=-1)
     probs = log_probs.exp()
 
@@ -70,9 +51,6 @@ def compute_metrics_per_token(
     next_token_log_probs = log_probs.gather(-1, target).squeeze(-1)
     entropy = -(probs * log_probs).sum(-1)
     max_log_probs = log_probs.max(dim=-1).values
-
-    # Tokens with log-prob >= the target token's log-prob (target itself
-    # always satisfies this, so quantile is in (0, 1]).
     greater_mask = (log_probs >= next_token_log_probs.unsqueeze(-1)).to(probs.dtype)
     quantile = greater_mask.mean(dim=-1)
     top_p = (probs * greater_mask).sum(-1)
@@ -83,6 +61,7 @@ def compute_metrics_per_token(
 
 
 def label_to_y(label: int) -> int:
+    # MAGE labels human as 1 and machine as 0; PAWN code uses y=1 for machine.
     return 1 - int(label)
 
 
@@ -96,15 +75,16 @@ def load_backbone(
     tok = AutoTokenizer.from_pretrained(backbone)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = (
+    model = cast(
+        PreTrainedModel,
         AutoModelForCausalLM.from_pretrained(
             backbone,
             torch_dtype=torch.bfloat16,
             output_hidden_states=True,
-        )
-        .to(device)
-        .eval()
+        ),
     )
+    model.to(device)  # pyright: ignore[reportArgumentType]
+    model.eval()
     return tok, model
 
 
@@ -145,24 +125,22 @@ def extract_one(
         row["text"],
         return_tensors="pt",
         truncation=True,
-        max_length=cfg.data.max_len,
+        max_length=int(cfg.data.max_len),
         padding=False,
     ).to(device)
     ids = enc["input_ids"]
-    if ids.size(1) < cfg.data.min_len:
+    if ids.size(1) < int(cfg.data.min_len):
         return None
 
     out = model(**enc)
     hs = out.hidden_states[-1][0]
     metrics = compute_metrics_per_token(out.logits[0, :-1], ids[0, 1:])
-    hs_curr = hs[:-1]
-    hs_next = hs[1:]
 
     return {
-        "hs_curr": hs_curr.to(torch.float16).cpu().contiguous(),
-        "hs_next": hs_next.to(torch.float16).cpu().contiguous(),
+        "hs_curr": hs[:-1].to(torch.float16).cpu().contiguous(),
+        "hs_next": hs[1:].to(torch.float16).cpu().contiguous(),
         "metrics": metrics.to(torch.float16).cpu().contiguous(),
-        "length": int(hs_curr.size(0)),
+        "length": int(hs.size(0) - 1),
         "y": label_to_y(row["label"]),
         "src": row.get("src", ""),
         "split": split,
@@ -174,34 +152,27 @@ def extract_split_on_rank(cfg: DictConfig, split: str) -> None:
     rank, world, local_rank = ddp_info()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
 
-    out_dir = Path(cfg.data.cache_dir) / split
+    out_dir = Path(str(cfg.data.cache_dir)) / split
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tok, model = load_backbone(cfg.data.backbone, device)
-
-    ds = load_dataset(cfg.data.dataset_name, split=split)
+    tok, model = load_backbone(str(cfg.data.backbone), device)
+    ds = load_dataset(str(cfg.data.dataset_name), split=split)
     if cfg.extract.limit:
-        ds = ds.select(range(cfg.extract.limit))
+        ds = ds.select(range(int(cfg.extract.limit)))
 
     my_indices = shard_indices(len(ds), rank, world)
-    log.info(
-        f"[rank {rank}/{world}] split={split} "
-        f"shard={len(my_indices)}/{len(ds)} device={device}"
-    )
+    log.info(f"[rank {rank}/{world}] split={split} shard={len(my_indices)}/{len(ds)} device={device}")
 
-    max_pending = cfg.extract.num_io_workers * cfg.extract.prefetch_factor
+    max_pending = int(cfg.extract.num_io_workers) * int(cfg.extract.prefetch_factor)
     kept = skipped = 0
-    progress = tqdm(
-        my_indices, desc=f"r{rank}[{split}]", disable=(rank != 0), mininterval=1.0
-    )
+    progress = tqdm(my_indices, desc=f"r{rank}[{split}]", disable=(rank != 0), mininterval=1.0)
 
-    with async_saver(cfg.extract.num_io_workers, max_pending) as submit:
+    with async_saver(int(cfg.extract.num_io_workers), max_pending) as submit:
         for idx in progress:
             out_path = out_dir / f"{idx:08d}.pt"
             if out_path.exists():
                 skipped += 1
                 continue
-
             payload = extract_one(model, tok, ds[idx], cfg, split, device)
             if payload is None:
                 continue
@@ -218,12 +189,12 @@ def main(cfg: DictConfig) -> None:
         torch.cuda.set_device(local_rank)
 
     cpu_per_rank = max(1, (os.cpu_count() or 32) // max(world, 1))
-    torch_threads = max(1, cpu_per_rank - cfg.extract.num_io_workers)
+    torch_threads = max(1, cpu_per_rank - int(cfg.extract.num_io_workers))
     torch.set_num_threads(torch_threads)
     if rank == 0:
         log.info(
             f"world={world} cpu_per_rank={cpu_per_rank} "
-            f"torch_threads={torch_threads} io_workers={cfg.extract.num_io_workers}"
+            f"torch_threads={torch_threads} io_workers={int(cfg.extract.num_io_workers)}"
         )
 
     for split in cfg.extract.splits:

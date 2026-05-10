@@ -4,5 +4,3 @@ splits: [train, validation, test]
 
 num_io_workers: 16
 prefetch_factor: 4
-
-log_every: 200
